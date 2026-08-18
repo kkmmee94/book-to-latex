@@ -70,6 +70,14 @@ except Exception:  # noqa: BLE001
 MATCH_MODE_EXACT = "exact"
 MATCH_MODE_PERCENT = "percentage"
 
+PAGE_FLOW_COMPACT = "compact"
+PAGE_FLOW_SOURCE = "source_pages"
+PAGE_SIZE_SOURCE = "source"
+PAGE_SIZE_A4 = "a4"
+PAGE_SIZE_LETTER = "letter"
+PHOTO_KEEP = "keep"
+PHOTO_DESCRIBE = "describe"
+
 DEFAULT_OPENAI_COMPAT_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 DEFAULT_OLLAMA_ENDPOINT = "http://127.0.0.1:11434/api/chat"
 
@@ -156,7 +164,6 @@ DEFAULT_LATEX_STYLE_GUIDE = """
 - Use amsmath/mathtools environments such as align*, cases, and gathered for mathematics.
 - Use semantic LaTeX rather than visual spacing hacks. Use booktabs conventions for tables and listings for code/console output.
 - Keep enumeration labels structural with enumerate/itemize rather than manually typed labels.
-- Do not reproduce running headers, page numbers, crop marks, or decorative footers as body text.
 - Never guess an unreadable formula or numeric value; preserve the extracted source and let the review report flag uncertainty.
 """.strip()
 
@@ -1158,6 +1165,94 @@ def _render_pdf_page_image(
     return output_path
 
 
+def _extract_pdf_page_assets(
+    pdf_doc: fitz.Document,
+    page_no: int,
+    output_dir: Path,
+    asset_dir_name: str,
+) -> list[tuple[Path, str]]:
+    """Extract non-page-sized raster assets that LaTeX may need to retain."""
+    page = pdf_doc.load_page(page_no)
+    page_area = max(float(page.rect.width * page.rect.height), 1.0)
+    assets: list[tuple[Path, str]] = []
+    seen_xrefs: set[int] = set()
+    for image_info in page.get_images(full=True):
+        xref = int(image_info[0])
+        if xref in seen_xrefs:
+            continue
+        seen_xrefs.add(xref)
+        try:
+            rectangles = page.get_image_rects(xref)
+        except Exception:  # noqa: BLE001
+            rectangles = []
+        if not rectangles:
+            continue
+        if max(float(rect.width * rect.height) / page_area for rect in rectangles) >= 0.80:
+            # This is usually a scan or existing full-page overlay, not a photo
+            # that should be duplicated inside an editable reconstruction.
+            continue
+        try:
+            extracted = pdf_doc.extract_image(xref)
+        except Exception:  # noqa: BLE001
+            continue
+        width = int(extracted.get("width") or 0)
+        height = int(extracted.get("height") or 0)
+        image_bytes = extracted.get("image")
+        extension = str(extracted.get("ext") or "png").lower()
+        if not image_bytes or width < 32 or height < 32:
+            continue
+        if extension not in {"png", "jpg", "jpeg"}:
+            try:
+                pixmap = fitz.Pixmap(pdf_doc, xref)
+                if pixmap.n - pixmap.alpha > 3:
+                    pixmap = fitz.Pixmap(fitz.csRGB, pixmap)
+                image_bytes = pixmap.tobytes("png")
+                extension = "png"
+            except Exception:  # noqa: BLE001
+                continue
+        output_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"page_{page_no + 1:03d}_asset_{xref}.{extension}"
+        output_path = output_dir / filename
+        if not output_path.is_file():
+            output_path.write_bytes(bytes(image_bytes))
+        reference = f"{asset_dir_name}/{filename}"
+        assets.append((output_path, reference))
+    return assets
+
+
+def _save_image_frame_asset(
+    file_path: Path,
+    frame_number: int,
+    page_number: int,
+    output_dir: Path,
+    asset_dir_name: str,
+) -> tuple[Path, str]:
+    """Save an image input in a LaTeX-compatible format for keep-photo mode."""
+    frame = _load_image_frame(file_path, frame_number).convert("RGB")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"source_image_{page_number:03d}.png"
+    output_path = output_dir / filename
+    frame.save(output_path, format="PNG", optimize=True)
+    return output_path, f"{asset_dir_name}/{filename}"
+
+
+def _cleanup_unreferenced_assets(
+    assets_dir: Path,
+    all_assets: list[tuple[Path, str]],
+    latex_body: str,
+) -> list[str]:
+    """Keep only assets that the generated LaTeX actually references."""
+    kept: list[str] = []
+    for path, reference in all_assets:
+        if reference in latex_body:
+            kept.append(reference)
+        elif path.is_file():
+            path.unlink()
+    if assets_dir.is_dir() and not any(assets_dir.iterdir()):
+        assets_dir.rmdir()
+    return kept
+
+
 def _ocr_pdf_page(
     pdf_doc: fitz.Document,
     page_no: int,
@@ -1243,11 +1338,20 @@ def _query_llm(
     match_mode: str,
     log_callback: LogCallback | None,
     document_language: str = "eng",
+    preserve_layout: bool = False,
+    preserve_color: bool = False,
+    page_flow: str = PAGE_FLOW_SOURCE,
+    photo_handling: str = PHOTO_KEEP,
+    page_asset_references: list[str] | None = None,
+    visual_inventory_summary: str = "",
+    semantic_asset_references: list[str] | None = None,
+    retained_visual_references: list[str] | None = None,
+    force_semantic_retry: bool = False,
 ) -> str:
     system_prompt = [
         "You are a publication-quality LaTeX converter.",
         "Convert the extracted content into valid LaTeX body content only.",
-        "Do not emit document preamble, sectioning macros, or fences.",
+        "Do not emit a document class, package imports, document environment, or Markdown fences. Use normal LaTeX sectioning commands when the source has headings.",
         "Preserve meaning and symbols exactly and do not insert explanations.",
         "Preserve headings, lists, slide structure, and tab-separated table rows when they are present.",
         DEFAULT_LATEX_STYLE_GUIDE,
@@ -1277,16 +1381,75 @@ def _query_llm(
         system_prompt.append(f"Project-specific style guide:\n{style_guide.strip()[:20000]}")
     if page_image_path is not None:
         system_prompt.append(
-            "A rendered source-page image is attached for analysis only. Read its visual structure and mathematics, and cross-check every digit and word against the extracted text. Reconstruct stacked fractions, limits, superscripts, subscripts, matrices, cases, and aligned derivations from the image. Never emit an includegraphics command for this page image and never invent an image filename. Only reference an image when its exact filename was explicitly supplied in the extracted content."
+            "A rendered source-page image is attached for analysis only. Read its full visual structure and mathematics, and cross-check every digit and word against the extracted text. Reconstruct stacked fractions, limits, superscripts, subscripts, matrices, cases, aligned derivations, tables, charts, timelines, flowcharts, geometric figures, technical diagrams, and other visuals that LaTeX can represent. Never emit an includegraphics command for the temporary page image and never invent an image filename."
+        )
+    if visual_inventory_summary:
+        system_prompt.append(
+            "A separate visual inventory identified the following page elements:\n"
+            f"{visual_inventory_summary}"
         )
     if redraw_graphs:
         system_prompt.append(
-            "When a graph is visible, redraw it as semantic TikZ/pgfplots code using values that are explicitly visible or present in the extracted text. Never guess coordinates or statistics."
+            "Semantic visual reconstruction is required. When a graph, chart, table, timeline, flowchart, equation, geometric figure, or technical diagram is visible, recreate it as editable LaTeX using tabular, TikZ, pgfplots, or standard mathematical environments. Use only values, labels, shapes, and relationships that are visible or extracted. Never replace a reconstructible visual with a blank box, prose-only summary, or invented values."
+        )
+
+    if preserve_layout and page_flow == PAGE_FLOW_SOURCE:
+        system_prompt.append(
+            "Reproduce the source page structure closely, including meaningful title bands, columns, colored boxes, logos, headers, footers, and top/bottom content. Do not emit a page break; the app controls page boundaries."
+        )
+    elif page_flow == PAGE_FLOW_COMPACT:
+        system_prompt.append(
+            "Create a compact continuous document. Preserve content order and hierarchy, but omit repeated running headers, repeated footers, source page numbers, and empty spacing. Do not emit a page break; let LaTeX flow content naturally."
+        )
+    else:
+        system_prompt.append(
+            "Keep the source unit self-contained without emitting a page break; the app controls page boundaries."
+        )
+
+    system_prompt.append(
+        "Preserve visible colors accurately with xcolor/TikZ styling."
+        if preserve_color
+        else "Render reconstructed text, rules, tables, charts, and diagrams in black and white."
+    )
+
+    asset_references = page_asset_references or []
+    if asset_references:
+        exact_assets = "\n".join(f"- {reference}" for reference in asset_references)
+        system_prompt.append(
+            "These are the only persistent raster assets available for this source page:\n"
+            f"{exact_assets}\n"
+            "You may reference them with \\includegraphics using the exact path shown. Never change, shorten, or invent a path. Logos, signatures, and meaningful artwork that cannot be represented faithfully in LaTeX may use these assets."
+        )
+    semantic_references = semantic_asset_references or []
+    if semantic_references:
+        system_prompt.append(
+            "The following raster references contain graphs, charts, tables, infographics, or technical diagrams and MUST NOT be used with includegraphics. Recreate their visible information semantically in LaTeX/TikZ/pgfplots/tabular instead:\n"
+            + "\n".join(f"- {reference}" for reference in semantic_references)
+        )
+    retained_references = retained_visual_references or []
+    if retained_references:
+        system_prompt.append(
+            "The following semantic visuals cannot be reconstructed exactly because their underlying values or geometry are not fully recoverable. Keep them visible with includegraphics using the exact supplied path; do not invent an approximate redraw:\n"
+            + "\n".join(f"- {reference}" for reference in retained_references)
+        )
+    if force_semantic_retry:
+        system_prompt.append(
+            "CORRECTION REQUIRED: a previous draft omitted or raster-embedded reconstructible visual content. This response must visibly recreate every inventoried semantic visual with actual LaTeX code."
+        )
+    if photo_handling == PHOTO_DESCRIBE:
+        system_prompt.append(
+            "For natural photographs of people, animals, places, or real-world objects, do not include the photograph. Replace each significant photograph at its approximate source position with a concise, objective italic description beginning with 'Photo description:'. Do not describe graphs, tables, equations, or diagrams; reconstruct those semantically instead."
+        )
+    else:
+        system_prompt.append(
+            "Keep significant natural photographs of people, animals, places, or real-world objects using their exact persistent asset path when one is available. Do not convert photographs into TikZ. Reconstruct graphs, tables, equations, and technical diagrams semantically instead of embedding their raster image."
         )
 
     user_prompt = (
         f"Source format: {source_format}\n"
         f"Content unit: {page_no + 1}\n\n"
+        f"Page usage: {page_flow}\n"
+        f"Natural-photo policy: {photo_handling}\n\n"
         "Extracted source content:\n"
         f"{page_text}\n\n"
         "Return only the LaTeX snippet for this page. /no_think"
@@ -1369,6 +1532,130 @@ def _query_llm(
             time.sleep(backoff * attempts)
 
 
+def _query_visual_inventory(
+    *,
+    page_image_path: Path,
+    page_no: int,
+    asset_references: list[str],
+    model: str,
+    endpoint: str,
+    api_key: str,
+    timeout: float,
+    retries: int,
+    backoff: float,
+    log_callback: LogCallback | None,
+) -> list[dict[str, str]]:
+    """Classify extracted raster assets before deciding redraw/keep/describe."""
+    system_prompt = (
+        "You are a visual document inventory classifier. Match each supplied asset reference to what it represents on the attached page. "
+        "Return JSON only with this exact shape: "
+        '{"assets":[{"reference":"exact supplied path","kind":"graph|chart|table|diagram|infographic|equation|photo|logo|screenshot|artwork|other","description":"objective description","reconstructable":"yes|no"}]}. '
+        "Use photo only for real people, animals, places, or physical objects. Graphs, charts, tables, infographics, equations and technical diagrams are semantic visuals even when stored as photographs or scans. Set reconstructable to yes only when all values, labels, and required geometry are visibly readable without guessing; use no for dense scientific plots, pictorial infographics, or any visual whose data cannot be recovered exactly. Include every supplied reference exactly once."
+    )
+    user_prompt = (
+        f"Source page: {page_no + 1}\n"
+        "Asset references:\n"
+        + "\n".join(f"- {reference}" for reference in asset_references)
+    )
+    encoded_image = base64.b64encode(page_image_path.read_bytes()).decode("ascii")
+    endpoint_path = urllib.parse.urlsplit(endpoint).path.rstrip("/")
+    ollama_native = endpoint_path == "/api/chat"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    if ollama_native:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt, "images": [encoded_image]},
+            ],
+            "format": "json",
+            "options": {"temperature": 0, "num_predict": 900},
+            "think": False,
+            "stream": False,
+        }
+    else:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{encoded_image}"},
+                        },
+                    ],
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": 900,
+            "stream": False,
+        }
+
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            _log(log_callback, f"Classifying visuals on page {page_no + 1}")
+            request = urllib.request.Request(
+                endpoint,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                response_json = json.loads(response.read().decode("utf-8"))
+            if ollama_native:
+                content = str(response_json.get("message", {}).get("content") or "")
+            else:
+                content = str(
+                    response_json.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content")
+                    or ""
+                )
+            cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.I)
+            parsed = json.loads(cleaned)
+            raw_assets = parsed.get("assets", []) if isinstance(parsed, dict) else []
+            by_reference = {
+                str(item.get("reference") or ""): item
+                for item in raw_assets
+                if isinstance(item, dict)
+            }
+            inventory: list[dict[str, str]] = []
+            for reference in asset_references:
+                item = by_reference.get(reference) or {}
+                inventory.append(
+                    {
+                        "reference": reference,
+                        "kind": str(item.get("kind") or "other").lower(),
+                        "description": str(item.get("description") or "Visual from the source page").strip(),
+                        "reconstructable": str(item.get("reconstructable") or "no").lower(),
+                    }
+                )
+            return inventory
+        except Exception as exc:  # noqa: BLE001
+            if attempts > retries:
+                _log(
+                    log_callback,
+                    f"Page {page_no + 1}: visual classification failed; keeping unclassified assets available ({exc})",
+                )
+                return [
+                    {
+                        "reference": reference,
+                        "kind": "other",
+                        "description": "Visual from the source page",
+                        "reconstructable": "no",
+                    }
+                    for reference in asset_references
+                ]
+            time.sleep(backoff * attempts)
+
+
 def _build_header(
     *,
     preserve_layout: bool,
@@ -1377,11 +1664,27 @@ def _build_header(
     exact_visual_mode: bool,
     source_is_pdf: bool,
     document_language: str,
+    page_size: str = PAGE_SIZE_A4,
+    page_flow: str = PAGE_FLOW_SOURCE,
+    source_page_size_points: list[float] | None = None,
+    has_assets: bool = False,
     redraw_graphs: bool = False,
     images_dir: str | None = None,
 ) -> str:
     lines: list[str] = []
-    lines.append("\\documentclass[11pt]{book}")
+    paper_option = {
+        PAGE_SIZE_A4: "a4paper",
+        PAGE_SIZE_LETTER: "letterpaper",
+    }.get(page_size)
+    if page_size == PAGE_SIZE_SOURCE and not source_page_size_points:
+        paper_option = "a4paper"
+    class_options = "11pt" + (f",{paper_option}" if paper_option else "")
+    class_name = (
+        "article"
+        if source_is_pdf and preserve_layout and not exact_visual_mode
+        else "book"
+    )
+    lines.append(f"\\documentclass[{class_options}]{{{class_name}}}")
     if document_language == "ara":
         lines.append("\\usepackage{fontspec}")
         lines.append("\\usepackage{polyglossia}")
@@ -1416,20 +1719,45 @@ def _build_header(
 
     if exact_visual_mode and source_is_pdf:
         lines.append("\\usepackage{pdfpages}")
-    elif preserve_graphs or exact_visual_mode:
+    elif preserve_graphs or exact_visual_mode or has_assets:
         lines.append("\\usepackage{graphicx}")
         lines.append("\\usepackage{float}")
+    if preserve_layout and page_flow == PAGE_FLOW_SOURCE and not exact_visual_mode:
+        lines.append("\\usepackage{adjustbox}")
 
-    if not preserve_color and preserve_graphs:
+    if preserve_color or redraw_graphs:
+        lines.append("\\usepackage[dvipsnames,table]{xcolor}")
+    elif preserve_graphs:
         lines.append("\\usepackage{xcolor}")
         lines.append("\\AtBeginDocument{\\color{black}}")
 
+    source_is_landscape = bool(
+        source_page_size_points
+        and len(source_page_size_points) >= 2
+        and source_page_size_points[0] > source_page_size_points[1]
+    )
+    if preserve_layout and source_is_landscape and document_language != "ara":
+        lines.append("\\usepackage{titlesec}")
+        lines.append("\\renewcommand{\\familydefault}{\\sfdefault}")
+        lines.append("\\titleformat{\\section}{\\Large\\sffamily\\mdseries}{}{0pt}{}")
+        lines.append("\\titlespacing*{\\section}{0pt}{0pt}{0.45em}")
+
+    if page_size == PAGE_SIZE_SOURCE and source_page_size_points:
+        paper_width, paper_height = source_page_size_points
+        margin = "0.25in" if preserve_layout else "0.7in"
+        lines.append(
+            "\\usepackage["
+            f"paperwidth={paper_width:.3f}bp,paperheight={paper_height:.3f}bp,margin={margin}"
+            "]{geometry}"
+        )
+    elif preserve_layout:
+        lines.append("\\usepackage[margin=0.65in]{geometry}")
+    else:
+        lines.append("\\usepackage[margin=1.4in]{geometry}")
     if preserve_layout:
-        lines.append("\\usepackage[margin=1in]{geometry}")
         lines.append("\\setlength{\\parskip}{0.3em}")
         lines.append("\\setlength{\\parindent}{0pt}")
     else:
-        lines.append("\\usepackage[margin=1.4in]{geometry}")
         lines.append("\\setlength{\\parskip}{0.8em}")
         lines.append("\\setlength{\\parindent}{0pt}")
 
@@ -1439,6 +1767,8 @@ def _build_header(
 
     lines.append("")
     lines.append("\\begin{document}")
+    if preserve_layout and page_flow == PAGE_FLOW_SOURCE:
+        lines.append("\\pagestyle{empty}")
     if not source_is_pdf and not exact_visual_mode:
         lines.append("\\chapter*{Converted manuscript}")
 
@@ -1448,6 +1778,34 @@ def _build_header(
 
 def _build_footer() -> str:
     return "\n\\end{document}"
+
+
+def _constrain_source_page_layout(latex: str, preserve_layout: bool, page_flow: str) -> str:
+    """Prevent reconstructed source pages from overflowing onto extra pages."""
+    if not preserve_layout or page_flow != PAGE_FLOW_SOURCE:
+        return latex
+
+    graphics_pattern = re.compile(
+        r"\\includegraphics(?:\[(?P<options>[^\]]*)\])?\{(?P<reference>[^{}]+)\}"
+    )
+
+    def constrain_graphic(match: re.Match[str]) -> str:
+        options = [option.strip() for option in (match.group("options") or "").split(",") if option.strip()]
+        if not any(option.startswith("height=") for option in options):
+            options.append(r"height=0.68\textheight")
+        if "keepaspectratio" not in options:
+            options.append("keepaspectratio")
+        if not any(option.startswith("width=") for option in options):
+            options.insert(0, r"width=\linewidth")
+        return f"\\includegraphics[{','.join(options)}]{{{match.group('reference')}}}"
+
+    constrained = graphics_pattern.sub(constrain_graphic, latex)
+    constrained = re.sub(
+        r"\\vspace\*?\{(?:[1-9]\d*(?:\.\d+)?|0\.[5-9]\d*)\s*(?:cm|in|mm)\}",
+        r"\\vspace{0.35em}",
+        constrained,
+    )
+    return constrained
 
 
 def _page_to_latex(
@@ -1477,6 +1835,11 @@ def _page_to_latex(
     log_callback: LogCallback | None,
     document_language: str = "eng",
     exact_source_reference: str | None = None,
+    page_size: str = PAGE_SIZE_SOURCE,
+    page_flow: str = PAGE_FLOW_SOURCE,
+    preserve_color: bool = False,
+    photo_handling: str = PHOTO_KEEP,
+    page_asset_references: list[str] | None = None,
 ) -> PageOutput:
     source = (page_text or "").strip()
     warnings: list[str] = []
@@ -1486,8 +1849,9 @@ def _page_to_latex(
     if exact_visual_mode and exact_source_reference:
         source_reference = exact_source_reference.replace("\\", "/")
         if source_format.startswith("PDF"):
+            fitpaper = "true" if page_size == PAGE_SIZE_SOURCE else "false"
             snippet = (
-                f"\\includepdf[pages={{{page_no + 1}}},fitpaper=true,pagecommand={{}}]"
+                f"\\includepdf[pages={{{page_no + 1}}},fitpaper={fitpaper},pagecommand={{}}]"
                 f"{{\\detokenize{{{source_reference}}}}}"
             )
         else:
@@ -1537,26 +1901,133 @@ def _page_to_latex(
         )
     else:
         try:
-            llm_raw = _query_llm(
-                page_text=source,
-                page_no=page_no,
-                source_format=source_format,
-                page_image_path=image_path if vision_mode else None,
-                style_guide=style_guide,
-                redraw_graphs=redraw_graphs,
-                model=model,
-                endpoint=endpoint,
-                api_key=api_key,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                timeout=timeout,
-                retries=retries,
-                backoff=backoff,
-                strict_mode=strict_mode,
-                match_mode=match_mode,
-                log_callback=log_callback,
-                document_language=document_language,
+            asset_references = page_asset_references or []
+            inventory: list[dict[str, str]] = []
+            if redraw_graphs and image_path is not None and asset_references:
+                inventory = _query_visual_inventory(
+                    page_image_path=image_path,
+                    page_no=page_no,
+                    asset_references=asset_references,
+                    model=model,
+                    endpoint=endpoint,
+                    api_key=api_key,
+                    timeout=timeout,
+                    retries=retries,
+                    backoff=backoff,
+                    log_callback=log_callback,
+                )
+            semantic_kinds = {
+                "graph",
+                "chart",
+                "table",
+                "diagram",
+                "infographic",
+                "equation",
+            }
+            semantic_items = [item for item in inventory if item["kind"] in semantic_kinds]
+            semantic_references = [
+                item["reference"]
+                for item in semantic_items
+                if item.get("reconstructable") == "yes"
+            ]
+            retained_visual_items = [
+                item
+                for item in semantic_items
+                if item.get("reconstructable") != "yes"
+            ]
+            retained_visual_references = [
+                item["reference"] for item in retained_visual_items
+            ]
+            if retained_visual_items:
+                warnings.append(
+                    "One or more source visuals were kept as images because exact semantic reconstruction would require guessing missing data"
+                )
+            photo_items = [item for item in inventory if item["kind"] == "photo"]
+            always_keep_kinds = {"logo", "screenshot", "artwork"}
+            required_keep_items = [
+                item
+                for item in inventory
+                if item["kind"] in always_keep_kinds
+                or (item["kind"] == "photo" and photo_handling == PHOTO_KEEP)
+                or item in retained_visual_items
+            ]
+            allowed_asset_references = [
+                reference
+                for reference in asset_references
+                if reference not in semantic_references
+                and not (
+                    photo_handling == PHOTO_DESCRIBE
+                    and any(
+                        item["reference"] == reference and item["kind"] == "photo"
+                        for item in inventory
+                    )
+                )
+            ]
+            inventory_summary = "\n".join(
+                f"- {item['kind']} (exactly reconstructable: {item.get('reconstructable', 'no')}): {item['description']} (asset: {item['reference']})"
+                for item in inventory
             )
+
+            def request_latex(force_retry: bool = False) -> str:
+                return _query_llm(
+                    page_text=source,
+                    page_no=page_no,
+                    source_format=source_format,
+                    page_image_path=image_path if vision_mode else None,
+                    style_guide=style_guide,
+                    redraw_graphs=redraw_graphs,
+                    model=model,
+                    endpoint=endpoint,
+                    api_key=api_key,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    timeout=timeout,
+                    retries=retries,
+                    backoff=backoff,
+                    strict_mode=strict_mode,
+                    match_mode=match_mode,
+                    log_callback=log_callback,
+                    document_language=document_language,
+                    preserve_layout=preserve_layout,
+                    preserve_color=preserve_color,
+                    page_flow=page_flow,
+                    photo_handling=photo_handling,
+                    page_asset_references=allowed_asset_references,
+                    visual_inventory_summary=inventory_summary,
+                    semantic_asset_references=semantic_references,
+                    retained_visual_references=retained_visual_references,
+                    force_semantic_retry=force_retry,
+                )
+
+            llm_raw = request_latex()
+            semantic_markers = (
+                r"\begin{tikzpicture}",
+                r"\begin{axis}",
+                r"\begin{tabular}",
+                r"\begin{longtable}",
+                r"\begin{array}",
+                r"\draw",
+                r"\addplot",
+            )
+            ungrounded_markers = (
+                "rand",
+                "placeholder",
+                "dummy data",
+                "approximate visual",
+                "approximation of",
+                "schematic only",
+            )
+            semantic_violation = bool(semantic_references) and (
+                any(reference in llm_raw for reference in semantic_references)
+                or not any(marker in llm_raw for marker in semantic_markers)
+                or any(marker in llm_raw.lower() for marker in ungrounded_markers)
+            )
+            if semantic_violation:
+                _log(
+                    log_callback,
+                    f"Page {page_no + 1}: retrying because a reconstructible visual was omitted or embedded as a raster",
+                )
+                llm_raw = request_latex(force_retry=True)
             llm = _clean_latex_output(llm_raw, strict_mode=strict_mode)
             llm, llm_issues = _post_validate_latex(llm)
             warnings.extend(llm_issues)
@@ -1566,6 +2037,45 @@ def _page_to_latex(
             )
             if not llm or fatal_validation:
                 raise ValueError("AI returned invalid LaTeX")
+
+            semantic_still_missing = bool(semantic_references) and (
+                any(reference in llm for reference in semantic_references)
+                or not any(marker in llm for marker in semantic_markers)
+                or any(marker in llm.lower() for marker in ungrounded_markers)
+            )
+            if semantic_still_missing:
+                warnings.append(
+                    "AI could not recreate one or more semantic visuals; the source visual was retained so it remains visible"
+                )
+                for item in inventory:
+                    if item["reference"] not in semantic_references:
+                        continue
+                    description = _escape_latex(item["description"])
+                    llm += (
+                        "\n\\begin{figure}[H]\n\\centering\n"
+                        f"\\includegraphics[width=.9\\linewidth]{{{item['reference']}}}\n"
+                        f"\\caption{{{description}}}\n\\end{{figure}}"
+                    )
+
+            for item in required_keep_items:
+                if item["reference"] in llm:
+                    continue
+                description = _escape_latex(item["description"])
+                llm += (
+                    "\n\\begin{figure}[H]\n\\centering\n"
+                    f"\\includegraphics[width=.9\\linewidth]{{{item['reference']}}}\n"
+                    f"\\caption{{{description}}}\n\\end{{figure}}"
+                )
+            if photo_handling == PHOTO_DESCRIBE:
+                for item in photo_items:
+                    description = _escape_latex(item["description"])
+                    if description in llm:
+                        continue
+                    llm += (
+                        "\n\\begin{quote}\\textit{Photo description: "
+                        f"{description}"
+                        "}\\end{quote}"
+                    )
         except Exception as exc:  # noqa: BLE001
             used_fallback = True
             warnings.append(f"AI conversion failed; safe local conversion used instead ({exc})")
@@ -1576,6 +2086,7 @@ def _page_to_latex(
                 strict_mode=True,
             )
 
+    llm = _constrain_source_page_layout(llm, preserve_layout, page_flow)
     page_body = llm
     if preserve_graphs and image_path is not None:
         figure = (
@@ -1585,6 +2096,14 @@ def _page_to_latex(
             "\\end{figure}"
         )
         page_body = f"{figure}\n{page_body}"
+    if preserve_layout and page_flow == PAGE_FLOW_SOURCE:
+        page_body = (
+            "\\begin{adjustbox}{max width=\\textwidth,max totalheight=0.94\\textheight,center}\n"
+            "\\begin{minipage}{\\textwidth}\n"
+            f"{page_body}\n"
+            "\\end{minipage}\n"
+            "\\end{adjustbox}"
+        )
 
     source_plain = _normalize_plain(source)
     generated_plain = _latex_to_plain(page_body)
@@ -1984,6 +2503,8 @@ def _ensure_latex_packages(
     if "\\usepackage{graphicx}" in source:
         required["graphicx.sty"] = "graphics"
         required["float.sty"] = "float"
+    if "xcolor}" in source:
+        required["xcolor.sty"] = "xcolor"
     if "\\usepackage{pdfpages}" in source:
         required["pdfpages.sty"] = "pdfpages"
         required["eso-pic.sty"] = "eso-pic"
@@ -1998,6 +2519,7 @@ def _ensure_latex_packages(
         "\\usepackage{multicol}": ("multicol.sty", "tools"),
         "\\usepackage{pdflscape}": ("pdflscape.sty", "pdflscape"),
         "\\usepackage{siunitx}": ("siunitx.sty", "siunitx"),
+        "\\usepackage{titlesec}": ("titlesec.sty", "titlesec"),
     }
     for package_line, (style_file, package_name) in optional_packages.items():
         if package_line in source:
@@ -2293,12 +2815,29 @@ def _write_conversion_report(
     document_language: str,
     compilation: dict[str, object] | None,
     uncertain_pages: list[int],
+    page_size: str = PAGE_SIZE_SOURCE,
+    page_flow: str = PAGE_FLOW_SOURCE,
+    photo_handling: str = PHOTO_KEEP,
+    assets: list[str] | None = None,
 ) -> Path:
     """Write one concise, non-technical outcome/error report per conversion."""
     report_path = output_path.with_name(f"{output_path.stem}_conversion_report.txt")
     compilation = compilation or {}
     success = bool(compilation.get("success"))
     repairs = [str(item) for item in compilation.get("repairs", [])]
+    page_size_label = {
+        PAGE_SIZE_SOURCE: "Match source",
+        PAGE_SIZE_A4: "A4",
+        PAGE_SIZE_LETTER: "Letter",
+    }.get(page_size, page_size)
+    page_flow_label = {
+        PAGE_FLOW_COMPACT: "Compact continuous flow",
+        PAGE_FLOW_SOURCE: "One source unit per output page",
+    }.get(page_flow, page_flow)
+    photo_label = {
+        PHOTO_KEEP: "Keep photos",
+        PHOTO_DESCRIBE: "Replace with descriptions",
+    }.get(photo_handling, photo_handling)
     lines = [
         "BOOK TO LATEX — CONVERSION REPORT",
         "",
@@ -2308,6 +2847,9 @@ def _write_conversion_report(
         f"Status: {'Completed successfully' if success else 'LaTeX created; compiled PDF needs attention'}",
         f"Content units converted: {converted_pages}",
         f"Document language: {DOCUMENT_LANGUAGES.get(document_language, document_language)}",
+        f"Page size: {page_size_label}",
+        f"Page usage: {page_flow_label}",
+        f"Natural photographs: {photo_label}",
         f"Compiler: {compilation.get('compiler') or 'Not run'}",
         "",
         str(compilation.get("message") or "PDF compilation was not requested."),
@@ -2318,6 +2860,14 @@ def _write_conversion_report(
                 "",
                 "Automatic repairs made before PDF creation:",
                 *[f"- {repair}" for repair in repairs],
+            ]
+        )
+    if assets:
+        lines.extend(
+            [
+                "",
+                "Required visual assets kept with the LaTeX project (photos, logos, screenshots, or visuals that could not be recreated exactly without guessing):",
+                *[f"- {asset}" for asset in assets],
             ]
         )
     if uncertain_pages:
@@ -2378,6 +2928,9 @@ def convert_book_to_latex(
     ocr_dpi: int = 220,
     ocr_lang: str = "eng",
     document_language: str = "",
+    page_size: str = PAGE_SIZE_SOURCE,
+    page_flow: str = PAGE_FLOW_SOURCE,
+    photo_handling: str = PHOTO_KEEP,
     preserve_graphs: bool = False,
     preserve_layout: bool = False,
     preserve_color: bool = False,
@@ -2425,6 +2978,12 @@ def convert_book_to_latex(
     if document_language not in DOCUMENT_LANGUAGES:
         supported = ", ".join(DOCUMENT_LANGUAGES.values())
         raise ValueError(f"Unsupported document language. Available languages: {supported}")
+    if page_size not in {PAGE_SIZE_SOURCE, PAGE_SIZE_A4, PAGE_SIZE_LETTER}:
+        raise ValueError("Page size must be source, a4, or letter")
+    if page_flow not in {PAGE_FLOW_COMPACT, PAGE_FLOW_SOURCE}:
+        raise ValueError("Page usage must be compact or source_pages")
+    if photo_handling not in {PHOTO_KEEP, PHOTO_DESCRIBE}:
+        raise ValueError("Photo handling must be keep or describe")
 
     file_ext = input_path.suffix.lower()
     source_is_pdf = file_ext == ".pdf"
@@ -2433,6 +2992,12 @@ def convert_book_to_latex(
     if image_only and not source_is_visual:
         raise ValueError("Exact page appearance is available only for PDF and image files")
     exact_visual_mode = source_is_visual and image_only
+    if exact_visual_mode and page_flow != PAGE_FLOW_SOURCE:
+        _log(
+            log_callback,
+            "Exact visual copy always keeps one source page per output page; compact flow is available in editable modes",
+        )
+        page_flow = PAGE_FLOW_SOURCE
     if vision_mode and not source_is_visual:
         raise ValueError("Vision-assisted conversion is available only for PDF and image files")
     if vision_mode and no_llm:
@@ -2485,6 +3050,17 @@ def convert_book_to_latex(
         raise ValueError(f"Start page cannot be after page {end_page}")
     selected_indices = list(range(start_page - 1, end_page))
 
+    extract_visual_assets = vision_mode and not exact_visual_mode
+    assets_dir_name = f"{_safe_file_component(output_path.stem)}_assets"
+    assets_dir = output_path.parent / assets_dir_name
+    page_assets: list[list[tuple[Path, str]]] = [[] for _ in range(total)]
+    all_assets: list[tuple[Path, str]] = []
+    if extract_visual_assets:
+        _remove_generated_directory(assets_dir, output_path)
+        assets_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        _remove_generated_directory(assets_dir, output_path)
+
     images: list[Path | None] = [None] * total
     asset_dir_name = f"{_safe_file_component(output_path.stem)}_images"
     persistent_images_dir = output_path.parent / asset_dir_name
@@ -2497,7 +3073,7 @@ def convert_book_to_latex(
         images_dir = Path(temporary_images.name)
     else:
         images_dir = persistent_images_dir
-    if source_is_pdf and (use_ocr or render_pages):
+    if source_is_pdf and (use_ocr or render_pages or extract_visual_assets):
         _ensure_fitz()
         if use_ocr:
             _ensure_ocr_dependencies()
@@ -2541,6 +3117,15 @@ def convert_book_to_latex(
                         color=preserve_color or exact_visual_mode,
                         output_dir=images_dir,
                     )
+                if extract_visual_assets:
+                    extracted_assets = _extract_pdf_page_assets(
+                        pdf_doc,
+                        idx,
+                        assets_dir,
+                        assets_dir_name,
+                    )
+                    page_assets[idx] = extracted_assets
+                    all_assets.extend(extracted_assets)
         finally:
             pdf_doc.close()
 
@@ -2576,6 +3161,16 @@ def convert_book_to_latex(
                     color=preserve_color or exact_visual_mode,
                     output_dir=images_dir,
                 )
+            if extract_visual_assets:
+                asset = _save_image_frame_asset(
+                    input_path,
+                    idx,
+                    idx + 1,
+                    assets_dir,
+                    assets_dir_name,
+                )
+                page_assets[idx] = [asset]
+                all_assets.append(asset)
 
     if exact_visual_mode:
         _log(
@@ -2629,6 +3224,11 @@ def convert_book_to_latex(
             log_callback=log_callback,
             document_language=document_language,
             exact_source_reference=exact_source_reference,
+            page_size=page_size,
+            page_flow=page_flow,
+            preserve_color=preserve_color,
+            photo_handling=photo_handling,
+            page_asset_references=[reference for _path, reference in page_assets[page_zero_index]],
         )
         processed.append(result)
         _progress(
@@ -2640,8 +3240,14 @@ def convert_book_to_latex(
 
     check_cancelled()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    body_separator = "\n" if exact_visual_mode and source_is_pdf else "\n\\newpage\n"
+    if exact_visual_mode and source_is_pdf:
+        body_separator = "\n"
+    elif page_flow == PAGE_FLOW_COMPACT:
+        body_separator = "\n\n"
+    else:
+        body_separator = "\n\\newpage\n"
     body = body_separator.join(page.latex_body for page in processed)
+    kept_assets = _cleanup_unreferenced_assets(assets_dir, all_assets, body)
     if no_wrapper:
         output_text = body + "\n"
     else:
@@ -2652,6 +3258,14 @@ def convert_book_to_latex(
             exact_visual_mode=exact_visual_mode,
             source_is_pdf=source_is_pdf,
             document_language=document_language,
+            page_size=page_size,
+            page_flow=page_flow,
+            source_page_size_points=(
+                list(pdf_analysis.get("page_size_points") or [])
+                if pdf_analysis
+                else None
+            ),
+            has_assets=bool(kept_assets),
             redraw_graphs=redraw_graphs,
             images_dir=None,
         )
@@ -2720,6 +3334,10 @@ def convert_book_to_latex(
         document_language=document_language,
         compilation=compilation,
         uncertain_pages=uncertain_pages,
+        page_size=page_size,
+        page_flow=page_flow,
+        photo_handling=photo_handling,
+        assets=kept_assets,
     )
     if temporary_images is not None:
         temporary_images.cleanup()
@@ -2732,6 +3350,8 @@ def convert_book_to_latex(
         "output_path": str(output_path),
         "pdf_path": compilation.get("pdf_path") if compilation else None,
         "images_dir": str(images_dir) if persistent_page_images else None,
+        "assets_dir": str(assets_dir) if kept_assets else None,
+        "assets": kept_assets,
         "page_files_dir": str(page_files_dir) if page_files_dir else None,
         "compilation": compilation,
         "start_page": start_page,
@@ -2742,6 +3362,9 @@ def convert_book_to_latex(
         "review": review,
         "report_path": str(report_path),
         "document_language": document_language,
+        "page_size": page_size,
+        "page_flow": page_flow,
+        "photo_handling": photo_handling,
         "strict_mode": strict_mode,
         "preserve_graphs": preserve_graphs,
         "preserve_layout": preserve_layout,
@@ -2786,12 +3409,30 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=sorted(DOCUMENT_LANGUAGES),
         help="Document language (eng or ara); Arabic automatically uses XeLaTeX and RTL layout",
     )
+    parser.add_argument(
+        "--page-size",
+        default=PAGE_SIZE_SOURCE,
+        choices=[PAGE_SIZE_SOURCE, PAGE_SIZE_A4, PAGE_SIZE_LETTER],
+        help="Use the source page size, A4, or US Letter",
+    )
+    parser.add_argument(
+        "--page-flow",
+        default=PAGE_FLOW_SOURCE,
+        choices=[PAGE_FLOW_COMPACT, PAGE_FLOW_SOURCE],
+        help="Flow content compactly or keep every source unit on its own output page",
+    )
+    parser.add_argument(
+        "--photo-handling",
+        default=PHOTO_KEEP,
+        choices=[PHOTO_KEEP, PHOTO_DESCRIBE],
+        help="Keep natural photographs or replace them with written descriptions",
+    )
     parser.add_argument("--preserve-graphs", action="store_true", help="Embed rendered page images")
     parser.add_argument("--preserve-layout", action="store_true", help="Prefer page layout preservation")
     parser.add_argument("--preserve-color", action="store_true", help="Keep color in rendered page images")
     parser.add_argument("--image-only", action="store_true", help="Use full-page images for exact PDF appearance")
     parser.add_argument("--vision", action="store_true", help="Send rendered PDF/image pages to a vision-capable AI model")
-    parser.add_argument("--redraw-graphs", action="store_true", help="Ask a vision model to redraw graphs using TikZ/pgfplots")
+    parser.add_argument("--redraw-graphs", action="store_true", help="Reconstruct graphs, tables and technical visuals as semantic LaTeX")
     parser.add_argument("--style-guide", default="", help="Optional UTF-8 text/Markdown file containing project LaTeX conventions")
     parser.add_argument("--compile-pdf", action="store_true", help="Also create a ready-to-read PDF")
     return parser
@@ -2837,6 +3478,9 @@ def main() -> None:
             ocr_dpi=args.ocr_dpi,
             ocr_lang=args.ocr_lang,
             document_language=args.document_language,
+            page_size=args.page_size,
+            page_flow=args.page_flow,
+            photo_handling=args.photo_handling,
             preserve_graphs=args.preserve_graphs,
             preserve_layout=args.preserve_layout,
             preserve_color=args.preserve_color,

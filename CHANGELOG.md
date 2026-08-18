@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.0 — 2026-08-18
+
+- Separated visual fidelity, physical page size, and page usage into clear user choices.
+- Added source-size, A4, and US Letter output.
+- Added compact continuous flow while retaining one-source-page-per-output-page mode.
+- Added Keep photographs and Replace photographs with descriptions policies.
+- Added visual inventory and enforcement for semantic graph, chart, table, equation, infographic, and technical-diagram reconstruction.
+- Retains the source visual when exact semantic reconstruction would require guessing, so images never silently disappear.
+- Preserves required assets while continuing to delete temporary page renders and unused extracted images.
+- Prevents reconstructed source pages from spilling onto unintended extra pages.
+
 ## 1.1.0 — 2026-08-18
 
 - Added Arabic OCR, right-to-left Unicode LaTeX, Polyglossia/Amiri, and XeLaTeX compilation.

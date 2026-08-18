@@ -17,6 +17,11 @@ from pptx import Presentation
 
 from book_to_latex import (
     DEFAULT_OLLAMA_ENDPOINT,
+    PAGE_FLOW_COMPACT,
+    PAGE_FLOW_SOURCE,
+    PAGE_SIZE_A4,
+    PHOTO_DESCRIBE,
+    PHOTO_KEEP,
     ConversionCancelled,
     _compile_latex,
     _escape_latex,
@@ -81,6 +86,36 @@ class TextConversionTests(unittest.TestCase):
             report = Path(str(result["review"]["report"]))
             self.assertTrue(report.is_file())
             self.assertIn("Book conversion review", report.read_text(encoding="utf-8"))
+
+    def test_compact_and_source_page_flows_are_both_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.txt"
+            source.write_text("First unit\nSecond unit", encoding="utf-8")
+            compact_output = root / "compact.tex"
+            source_pages_output = root / "source-pages.tex"
+            compact = convert_book_to_latex(
+                input_path=source,
+                output_path=compact_output,
+                no_llm=True,
+                lines_per_page=1,
+                page_flow=PAGE_FLOW_COMPACT,
+                page_size=PAGE_SIZE_A4,
+                no_review=True,
+            )
+            separated = convert_book_to_latex(
+                input_path=source,
+                output_path=source_pages_output,
+                no_llm=True,
+                lines_per_page=1,
+                page_flow=PAGE_FLOW_SOURCE,
+                page_size=PAGE_SIZE_A4,
+                no_review=True,
+            )
+            self.assertNotIn(r"\newpage", compact_output.read_text(encoding="utf-8"))
+            self.assertIn(r"\newpage", source_pages_output.read_text(encoding="utf-8"))
+            self.assertEqual(compact["page_flow"], PAGE_FLOW_COMPACT)
+            self.assertEqual(separated["page_flow"], PAGE_FLOW_SOURCE)
 
     def test_pdf_compilation_when_pdflatex_is_available(self) -> None:
         if not shutil.which("pdflatex"):
@@ -282,6 +317,7 @@ class PdfImageTests(unittest.TestCase):
                 input_path=source,
                 output_path=output,
                 image_only=True,
+                page_flow=PAGE_FLOW_COMPACT,
                 start_page=2,
                 end_page=2,
                 compile_pdf=bool(shutil.which("pdflatex")),
@@ -291,11 +327,213 @@ class PdfImageTests(unittest.TestCase):
             self.assertIn(r"\includepdf[pages={2},fitpaper=true", tex)
             self.assertIn(r"\detokenize{source.pdf}", tex)
             self.assertIsNone(result["images_dir"])
+            self.assertEqual(result["page_flow"], PAGE_FLOW_SOURCE)
             self.assertFalse((root / "My_finished_book_images").exists())
             if shutil.which("pdflatex"):
                 self.assertTrue(result["compilation"]["success"])
                 compiled_analysis = analyze_pdf(Path(str(result["pdf_path"])))
                 self.assertEqual(compiled_analysis["page_count"], 1)
+                source_analysis = analyze_pdf(source)
+                for actual, expected in zip(
+                    compiled_analysis["page_size_points"],
+                    source_analysis["page_size_points"],
+                    strict=True,
+                ):
+                    self.assertAlmostEqual(actual, expected, delta=1.0)
+
+    def test_exact_copy_can_be_placed_on_a4_without_losing_source_page_mode(self) -> None:
+        if not shutil.which("pdflatex"):
+            self.skipTest("pdflatex is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "landscape.pdf"
+            document = fitz.open()
+            page = document.new_page(width=400, height=250)
+            page.insert_text((40, 80), "Landscape source", fontsize=24)
+            document.save(source)
+            document.close()
+            result = convert_book_to_latex(
+                input_path=source,
+                output_path=root / "a4-copy.tex",
+                image_only=True,
+                page_size=PAGE_SIZE_A4,
+                compile_pdf=True,
+                no_review=True,
+            )
+            self.assertTrue(result["compilation"]["success"])
+            tex = (root / "a4-copy.tex").read_text(encoding="utf-8")
+            self.assertIn("a4paper", tex)
+            self.assertIn("fitpaper=false", tex)
+            analysis = analyze_pdf(Path(str(result["pdf_path"])))
+            self.assertAlmostEqual(analysis["page_size_points"][0], 595.276, delta=1.0)
+            self.assertAlmostEqual(analysis["page_size_points"][1], 841.89, delta=1.0)
+
+    def test_close_layout_keeps_only_referenced_real_photo_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            photo = root / "photo.png"
+            photo_document = fitz.open()
+            photo_page = photo_document.new_page(width=180, height=120)
+            photo_page.draw_rect(photo_page.rect, color=(0.1, 0.4, 0.8), fill=(0.1, 0.4, 0.8))
+            photo_page.insert_text((25, 65), "BEAR PHOTO", fontsize=18, color=(1, 1, 1))
+            photo_page.get_pixmap(alpha=False).save(photo)
+            photo_document.close()
+
+            source = root / "source-with-photo.pdf"
+            document = fitz.open()
+            page = document.new_page(width=600, height=800)
+            page.insert_text((60, 70), "Wildlife report", fontsize=20)
+            page.insert_image(fitz.Rect(80, 130, 440, 370), filename=str(photo))
+            document.save(source)
+            document.close()
+
+            def include_exact_asset(**kwargs):
+                references = kwargs["page_asset_references"]
+                self.assertTrue(references)
+                return (
+                    "\\section*{Wildlife report}\n"
+                    "\\begin{figure}[H]\\centering\n"
+                    f"\\includegraphics[width=.6\\linewidth]{{{references[0]}}}\n"
+                    "\\caption{Bear in its habitat}\\end{figure}"
+                )
+
+            def classify_as_photo(**kwargs):
+                return [
+                    {
+                        "reference": kwargs["asset_references"][0],
+                        "kind": "photo",
+                        "description": "A bear in its habitat",
+                    }
+                ]
+
+            with patch("book_to_latex._query_llm", side_effect=include_exact_asset), patch(
+                "book_to_latex._query_visual_inventory",
+                side_effect=classify_as_photo,
+            ):
+                result = convert_book_to_latex(
+                    input_path=source,
+                    output_path=root / "photo-project.tex",
+                    model="vision-test",
+                    vision_mode=True,
+                    redraw_graphs=True,
+                    photo_handling=PHOTO_KEEP,
+                    no_review=True,
+                )
+            self.assertIsNone(result["images_dir"])
+            self.assertTrue(result["assets"])
+            assets_dir = Path(str(result["assets_dir"]))
+            self.assertTrue(assets_dir.is_dir())
+            self.assertEqual(len(list(assets_dir.iterdir())), 1)
+            tex = (root / "photo-project.tex").read_text(encoding="utf-8")
+            self.assertIn(result["assets"][0], tex)
+            self.assertIn(r"\usepackage{graphicx}", tex)
+
+    def test_raster_graph_is_retried_as_semantic_latex_and_asset_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            graph = root / "graph.png"
+            graph_document = fitz.open()
+            graph_page = graph_document.new_page(width=220, height=150)
+            graph_page.draw_line((20, 125), (200, 125), width=2)
+            graph_page.draw_line((20, 125), (20, 20), width=2)
+            graph_page.draw_polyline([(25, 110), (70, 80), (115, 95), (170, 35)], color=(0, 0.3, 0.9), width=3)
+            graph_page.get_pixmap(alpha=False).save(graph)
+            graph_document.close()
+            source = root / "graph-source.pdf"
+            document = fitz.open()
+            page = document.new_page(width=600, height=800)
+            page.insert_text((70, 70), "Results over time", fontsize=20)
+            page.insert_image(fitz.Rect(80, 140, 520, 440), filename=str(graph))
+            document.save(source)
+            document.close()
+
+            call_count = 0
+
+            def classify_graph(**kwargs):
+                return [
+                    {
+                        "reference": kwargs["asset_references"][0],
+                        "kind": "graph",
+                        "description": "A line graph of results over time",
+                        "reconstructable": "yes",
+                    }
+                ]
+
+            def retry_semantically(**kwargs):
+                nonlocal call_count
+                call_count += 1
+                if not kwargs["force_semantic_retry"]:
+                    return f"\\includegraphics{{{kwargs['semantic_asset_references'][0]}}}"
+                return (
+                    "\\begin{tikzpicture}\n"
+                    "\\begin{axis}[xlabel={Time},ylabel={Result}]\n"
+                    "\\addplot coordinates {(1,1) (2,3) (3,2) (4,5)};\n"
+                    "\\end{axis}\n\\end{tikzpicture}"
+                )
+
+            with patch("book_to_latex._query_visual_inventory", side_effect=classify_graph), patch(
+                "book_to_latex._query_llm",
+                side_effect=retry_semantically,
+            ):
+                result = convert_book_to_latex(
+                    input_path=source,
+                    output_path=root / "semantic-graph.tex",
+                    model="vision-test",
+                    vision_mode=True,
+                    redraw_graphs=True,
+                    no_review=True,
+                )
+            tex = (root / "semantic-graph.tex").read_text(encoding="utf-8")
+            self.assertEqual(call_count, 2)
+            self.assertIn(r"\begin{axis}", tex)
+            self.assertIsNone(result["assets_dir"])
+            self.assertFalse((root / "semantic-graph_assets").exists())
+
+    def test_describe_photo_policy_adds_description_and_removes_photo_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            photo = root / "person.png"
+            image_document = fitz.open()
+            image_page = image_document.new_page(width=160, height=160)
+            image_page.draw_circle((80, 50), 25, color=(0.2, 0.2, 0.2), fill=(0.8, 0.6, 0.4))
+            image_page.draw_rect(fitz.Rect(45, 80, 115, 150), color=(0.1, 0.3, 0.7), fill=(0.1, 0.3, 0.7))
+            image_page.get_pixmap(alpha=False).save(photo)
+            image_document.close()
+            source = root / "person-source.pdf"
+            document = fitz.open()
+            page = document.new_page(width=600, height=800)
+            page.insert_text((70, 70), "Author profile", fontsize=20)
+            page.insert_image(fitz.Rect(120, 140, 360, 380), filename=str(photo))
+            document.save(source)
+            document.close()
+
+            def classify_photo(**kwargs):
+                return [
+                    {
+                        "reference": kwargs["asset_references"][0],
+                        "kind": "photo",
+                        "description": "A portrait of the author wearing a blue shirt",
+                    }
+                ]
+
+            with patch("book_to_latex._query_visual_inventory", side_effect=classify_photo), patch(
+                "book_to_latex._query_llm",
+                return_value="\\section*{Author profile}",
+            ):
+                result = convert_book_to_latex(
+                    input_path=source,
+                    output_path=root / "described-photo.tex",
+                    model="vision-test",
+                    vision_mode=True,
+                    redraw_graphs=True,
+                    photo_handling=PHOTO_DESCRIBE,
+                    no_review=True,
+                )
+            tex = (root / "described-photo.tex").read_text(encoding="utf-8")
+            self.assertIn("Photo description:", tex)
+            self.assertIn("portrait of the author", tex)
+            self.assertNotIn(r"\includegraphics", tex)
+            self.assertIsNone(result["assets_dir"])
 
     def test_vision_page_images_are_temporary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, patch(
@@ -314,6 +552,36 @@ class PdfImageTests(unittest.TestCase):
             )
             self.assertIsNone(result["images_dir"])
             self.assertFalse((root / "finished_images").exists())
+
+    def test_editable_source_page_mode_cannot_spill_one_unit_to_extra_pages(self) -> None:
+        if not shutil.which("pdflatex"):
+            self.skipTest("pdflatex is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.pdf"
+            output = root / "source-page.tex"
+            self._make_pdf(source, pages=1)
+            result = convert_book_to_latex(
+                input_path=source,
+                output_path=output,
+                no_llm=True,
+                preserve_layout=True,
+                page_flow=PAGE_FLOW_SOURCE,
+                compile_pdf=True,
+                no_review=True,
+            )
+            self.assertTrue(result["compilation"]["success"])
+            analysis = analyze_pdf(Path(str(result["pdf_path"])))
+            self.assertEqual(analysis["page_count"], 1)
+            source_analysis = analyze_pdf(source)
+            for actual, expected in zip(
+                analysis["page_size_points"],
+                source_analysis["page_size_points"],
+                strict=True,
+            ):
+                self.assertAlmostEqual(actual, expected, delta=0.1)
+            tex = output.read_text(encoding="utf-8")
+            self.assertIn(r"\begin{adjustbox}", tex)
 
     def test_image_input_runs_ocr_automatically(self) -> None:
         if not runtime_capabilities().get("tesseract"):
@@ -394,6 +662,11 @@ class OllamaIntegrationTests(unittest.TestCase):
                 strict_mode=True,
                 match_mode="exact",
                 log_callback=None,
+                preserve_layout=True,
+                preserve_color=True,
+                page_flow=PAGE_FLOW_COMPACT,
+                photo_handling=PHOTO_DESCRIBE,
+                page_asset_references=["finished_assets/photo.png"],
             )
             self.assertEqual(result, "Value 42.")
             request = mocked_open.call_args.args[0]
@@ -401,6 +674,10 @@ class OllamaIntegrationTests(unittest.TestCase):
             self.assertIs(payload["think"], False)
             self.assertEqual(payload["messages"][1]["images"], ["ZmFrZS1wbmc="])
             self.assertIn("Use \\Prob", payload["messages"][0]["content"])
+            self.assertIn("finished_assets/photo.png", payload["messages"][0]["content"])
+            self.assertIn("Photo description:", payload["messages"][0]["content"])
+            self.assertIn("Semantic visual reconstruction is required", payload["messages"][0]["content"])
+            self.assertIn("compact continuous document", payload["messages"][0]["content"])
 
     def test_ollama_discovery_has_stable_shape(self) -> None:
         from book_to_latex import ollama_connection_info

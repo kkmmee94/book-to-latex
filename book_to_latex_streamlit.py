@@ -17,6 +17,13 @@ from book_to_latex import (
     DOCUMENT_LANGUAGES,
     IMAGE_EXTENSIONS,
     MATCH_MODE_PERCENT,
+    PAGE_FLOW_COMPACT,
+    PAGE_FLOW_SOURCE,
+    PAGE_SIZE_A4,
+    PAGE_SIZE_LETTER,
+    PAGE_SIZE_SOURCE,
+    PHOTO_DESCRIBE,
+    PHOTO_KEEP,
     convert_book_to_latex,
     ollama_connection_info,
     runtime_capabilities,
@@ -31,6 +38,20 @@ AI_AUTO = "Automatic (recommended)"
 AI_OLLAMA = "Choose an installed Ollama model"
 AI_OPENAI = "Use an OpenAI-compatible service"
 AI_NONE = "Do not use AI"
+
+PAGE_SIZE_LABELS = {
+    "Same size as the original": PAGE_SIZE_SOURCE,
+    "A4 pages": PAGE_SIZE_A4,
+    "US Letter pages": PAGE_SIZE_LETTER,
+}
+PAGE_FLOW_LABELS = {
+    "Compact — use fewer pages": PAGE_FLOW_COMPACT,
+    "Keep every source page separate": PAGE_FLOW_SOURCE,
+}
+PHOTO_LABELS = {
+    "Keep real photographs": PHOTO_KEEP,
+    "Replace photographs with descriptions": PHOTO_DESCRIBE,
+}
 
 def _read_csv_rows(path: Path) -> list[dict]:
     with path.open("r", encoding="utf-8", newline="") as stream:
@@ -55,7 +76,9 @@ def _zip_finished_project(result: dict[str, object]) -> bytes:
         result.get("output_path"),
         result.get("pdf_path"),
         result.get("report_path"),
+        result.get("input_path") if result.get("exact_visual_mode") else None,
         result.get("images_dir"),
+        result.get("assets_dir"),
         result.get("page_files_dir"),
         compilation.get("log_path"),
         review.get("review_dir"),
@@ -112,8 +135,9 @@ with st.expander("How it works"):
         """
 1. Choose the original file.
 2. Choose **Clean and editable**, **Stay close to the original**, or **Exact visual copy**.
-3. Choose colour or black and white.
-4. Select **Create LaTeX and PDF**.
+3. Choose page size and compact or source-page flow.
+4. Choose whether real photographs stay visible or become written descriptions.
+5. Select **Create LaTeX and PDF**.
 
 The result includes the LaTeX file, compiled PDF and a quality-check report. Technical controls are hidden in Advanced settings.
 """
@@ -151,22 +175,28 @@ look = st.radio(
 )
 look_descriptions = {
     LOOK_CLEAN: "Best for novels, poetry and documents you want to edit. Creates clean readable LaTeX without copying every page position.",
-    LOOK_CLOSE: "Best for mathematics, tables and structured pages. Vision AI studies each page and recreates it as editable LaTeX.",
-    LOOK_EXACT: "Looks identical because each original PDF/image page is placed directly into LaTeX. The text is not editable, and temporary page pictures are not kept.",
+    LOOK_CLOSE: "Vision AI recreates editable mathematics, tables, graphs, diagrams, colors, headers, footers and page structure. Real photographs follow your Keep or Describe choice.",
+    LOOK_EXACT: "Places each original page directly into LaTeX with colors, shapes, headers, footers and photographs unchanged. Exact copy is always one source page per output page.",
 }
 st.info(look_descriptions[look])
 
 if look == LOOK_EXACT and not input_is_visual:
     st.error("Exact visual copy is available for PDFs and images. Choose another appearance.")
 
-st.subheader("3. Simple preferences")
+st.subheader("3. Page, language and pictures")
 left, right = st.columns(2)
 with left:
     colour_choice = st.radio(
         "Colour",
-        [COLOUR_KEEP, COLOUR_MONO],
+        [COLOUR_KEEP] if look == LOOK_EXACT else [COLOUR_KEEP, COLOUR_MONO],
         horizontal=True,
-        help="Controls preserved page pictures and visual reconstruction.",
+        help="Close-layout mode reproduces visual colors. Exact copy always keeps source colors.",
+    )
+    page_size_label = st.selectbox(
+        "Finished page size",
+        list(PAGE_SIZE_LABELS),
+        index=0 if look == LOOK_EXACT else 1,
+        help="Same size preserves the source PDF shape. A4 or US Letter places the result on that paper size.",
     )
 with right:
     language_labels = {label: code for code, label in DOCUMENT_LANGUAGES.items()}
@@ -175,9 +205,31 @@ with right:
         list(language_labels),
         help="Arabic automatically enables right-to-left LaTeX, Arabic OCR and XeLaTeX. The app preserves the original language and does not translate it.",
     )
+    if look == LOOK_EXACT:
+        page_flow_label = "Keep every source page separate"
+        st.selectbox("Use of pages", [page_flow_label], disabled=True)
+    else:
+        page_flow_label = st.selectbox(
+            "Use of pages",
+            list(PAGE_FLOW_LABELS),
+            help="Compact uses fewer pages. The other choice keeps every source page boundary.",
+        )
+
+photo_label = st.selectbox(
+    "Real photographs",
+    list(PHOTO_LABELS),
+    disabled=look == LOOK_EXACT,
+    help="Keep photographs as required project assets or replace them with descriptions. Graphs, tables, equations and technical diagrams are recreated as editable LaTeX either way.",
+)
+st.caption("Graphs, tables, equations and technical diagrams are recreated as editable LaTeX automatically in close-layout mode.")
 
 default_output_dir = str(Path.cwd())
-default_output_name = f"{Path(safe_upload_name).stem}_latex.tex"
+default_suffix = {
+    LOOK_CLEAN: "_latex.tex",
+    LOOK_CLOSE: "_close_layout.tex",
+    LOOK_EXACT: "_exact_copy.tex",
+}[look]
+default_output_name = f"{Path(safe_upload_name).stem}{default_suffix}"
 
 with st.expander("Advanced settings — optional"):
     st.caption("Most people should leave these settings unchanged.")
@@ -222,7 +274,10 @@ with st.expander("Advanced settings — optional"):
     temperature = st.slider("AI creativity", 0.0, 2.0, 0.0, 0.05)
     timeout = st.number_input("AI timeout (seconds)", 10, 1200, 180)
     retries = st.number_input("AI retry count", 0, 8, 2)
-    redraw_graphs = st.checkbox("Redraw visible graphs with TikZ/pgfplots", value=False)
+    redraw_graphs = st.checkbox(
+        "Recreate graphs, tables and technical diagrams as editable LaTeX",
+        value=True,
+    )
     style_guide_upload = st.file_uploader("Project style guide", type=["md", "txt"])
 
 if "output_dir" not in locals():
@@ -245,7 +300,7 @@ if "output_dir" not in locals():
     temperature = 0.0
     timeout = 180
     retries = 2
-    redraw_graphs = False
+    redraw_graphs = True
     style_guide_upload = None
 
 start = st.button("Create LaTeX and PDF", type="primary", use_container_width=True)
@@ -306,10 +361,14 @@ def on_progress(current: int, total: int, message: str) -> None:
 
 
 with tempfile.TemporaryDirectory() as temporary:
-    input_path = Path(temporary) / safe_upload_name
+    exact = look == LOOK_EXACT
+    input_path = (
+        output_directory / f"{output_path.stem}_required_source{input_extension}"
+        if exact
+        else Path(temporary) / safe_upload_name
+    )
     input_path.write_bytes(uploaded.getvalue())
     try:
-        exact = look == LOOK_EXACT
         close = look == LOOK_CLOSE
         result = convert_book_to_latex(
             input_path=input_path,
@@ -338,9 +397,12 @@ with tempfile.TemporaryDirectory() as temporary:
             ocr_dpi=int(ocr_dpi),
             ocr_lang=language_labels[language_label],
             document_language=language_labels[language_label],
+            page_size=PAGE_SIZE_LABELS[page_size_label],
+            page_flow=PAGE_FLOW_LABELS[page_flow_label],
+            photo_handling=PHOTO_LABELS[photo_label],
             preserve_graphs=False,
             preserve_layout=close or exact or keep_line_breaks,
-            preserve_color=(colour_choice == COLOUR_KEEP) and (close or exact),
+            preserve_color=True if exact else (colour_choice == COLOUR_KEEP) and close,
             image_only=exact,
             vision_mode=vision_mode,
             redraw_graphs=close and redraw_graphs,
