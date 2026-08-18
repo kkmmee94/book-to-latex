@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.2 — 2026-08-18
+
+- Fixed HTTPS certificate verification in packaged macOS builds by shipping a current CA bundle.
+- Replaced free-text OpenAI model and endpoint fields with guided model choices, an API-key link, and a connection test.
+- Added automatic discovery for Ollama, LM Studio, Jan, llama.cpp, GPT4All, Hugging Face, GGUF, Safetensors, and MLX model locations.
+- Added one-click installation of a recommended Ollama text-and-vision model on Windows, macOS, and Linux.
+- Replaced the Windows-only local vision-model error with cross-platform setup guidance and OpenAI fallback.
+- Repaired additional AI-generated TikZ faults, including invalid triangle/marker shapes, grid coordinates, placeholder plots, colors, paired ranges, and text-mode markers.
+
 ## 1.3.1 — 2026-08-18
 
 - Restored a consistently English application interface.

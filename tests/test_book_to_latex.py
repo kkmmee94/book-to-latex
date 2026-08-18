@@ -65,12 +65,70 @@ class UpdateTests(unittest.TestCase):
                     }
                 ).encode("utf-8")
 
-        with patch("book_to_latex.urllib.request.urlopen", return_value=FakeResponse()):
+        with patch("book_to_latex.urllib.request.urlopen", return_value=FakeResponse()) as mocked_open:
             result = check_for_updates()
         self.assertEqual(result["current_version"], APP_VERSION)
         self.assertEqual(result["latest_version"], "99.0.0")
         self.assertTrue(result["update_available"])
         self.assertEqual(result["assets"][0]["name"], "Book-to-LaTeX-Setup.exe")
+        self.assertIn("context", mocked_open.call_args.kwargs)
+
+    def test_openai_connection_chooses_recommended_available_models(self) -> None:
+        from book_to_latex import openai_connection_info
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps(
+                    {"data": [{"id": "gpt-5.6-luna"}, {"id": "gpt-5.6-terra"}]}
+                ).encode("utf-8")
+
+        with patch("book_to_latex.urllib.request.urlopen", return_value=FakeResponse()):
+            info = openai_connection_info("sk-test")
+        self.assertTrue(info["available"])
+        self.assertEqual(info["models"], ["gpt-5.6-terra", "gpt-5.6-luna"])
+
+    def test_openai_gpt5_payload_uses_current_completion_limit(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({"choices": [{"message": {"content": "Ready"}}]}).encode("utf-8")
+
+        with patch("book_to_latex.urllib.request.urlopen", return_value=FakeResponse()) as mocked_open:
+            result = _query_llm(
+                page_text="Ready",
+                page_no=0,
+                source_format="text",
+                page_image_path=None,
+                style_guide="",
+                redraw_graphs=False,
+                model="gpt-5.6-terra",
+                endpoint="https://api.openai.com/v1/chat/completions",
+                api_key="sk-test",
+                max_tokens=1000,
+                temperature=0,
+                timeout=10,
+                retries=0,
+                backoff=1,
+                strict_mode=True,
+                match_mode="exact",
+                log_callback=None,
+            )
+        self.assertEqual(result, "Ready")
+        payload = json.loads(mocked_open.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(payload["max_completion_tokens"], 1000)
+        self.assertNotIn("max_tokens", payload)
+        self.assertNotIn("temperature", payload)
 
 
 class TextConversionTests(unittest.TestCase):
@@ -255,6 +313,40 @@ class TextConversionTests(unittest.TestCase):
             self.assertTrue(any("table" in repair for repair in result["repairs"]))
             self.assertTrue(any("multirow" in repair for repair in result["repairs"]))
             self.assertTrue(any("TikZ" in repair for repair in result["repairs"]))
+
+    def test_compile_repairs_bare_tikz_triangle_shape(self) -> None:
+        if not shutil.which("pdflatex"):
+            self.skipTest("pdflatex is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "triangle.tex"
+            output.write_text(
+                "\\documentclass{article}\n"
+                "\\usepackage{tikz}\n"
+                "\\begin{document}\n"
+                "\\begin{tikzpicture}\n"
+                "\\node at (1,1) [triangle, draw=red, fill=red] {};\n"
+                "\\foreach \\y in {0, 2, ..., 12} {\n"
+                "\\draw[dashed] (0, \\y/2 + 1) -- (\\x/2.5 - 50/2.5, \\y/2 + 1);\n"
+                "\\draw[dashed] (\\pgfkeysvalueof{/pgf/axis x end},\\y) -- (0,\\y);\n"
+                "}\n"
+                "\\coordinate (Sample_1990) at (2,5);\n"
+                "\\draw[blue] plot coordinates {(Sample_1990) ...};\n"
+                "\\fill[blue] (2,3) diamond (2pt); \\% Europe\n"
+                "\\node at (3,3) {\\textcolor{red}{\\times}};\n"
+                "\\end{tikzpicture}\n"
+                "\\end{document}\n",
+                encoding="utf-8",
+            )
+            result = _compile_latex(output, None)
+            self.assertTrue(result["success"])
+            repaired = output.read_text(encoding="utf-8")
+            self.assertIn("regular polygon sides=3", repaired)
+            self.assertIn(r"\usetikzlibrary{shapes.geometric}", repaired)
+            self.assertIn(r"-- (12, \y/2 + 1)", repaired)
+            self.assertIn(r"(12,\y) -- (0,\y)", repaired)
+            self.assertIn(r"\fill[blue] (Sample_1990) circle (2pt);", repaired)
+            self.assertIn(r"\node[diamond, draw=blue, fill=blue", repaired)
+            self.assertIn(r"\textcolor{red}{$\times$}", repaired)
 
     def test_compile_repairs_floats_inside_one_page_boxes(self) -> None:
         if not shutil.which("pdflatex"):
@@ -806,6 +898,39 @@ class OllamaIntegrationTests(unittest.TestCase):
         self.assertIn("models", info)
         if info["available"]:
             self.assertTrue(all("name" in model for model in info["models"]))
+
+    def test_local_discovery_combines_ollama_and_mac_style_servers(self) -> None:
+        from book_to_latex import discover_local_ai
+
+        ollama_info = {
+            "available": True,
+            "models": [{"name": "qwen3.5:9b", "vision": True}],
+            "error": None,
+        }
+
+        def server_models(name, base_url, _timeout):
+            if name != "LM Studio":
+                return []
+            return [
+                {
+                    "name": "local-vision-model",
+                    "provider": "openai",
+                    "endpoint": f"{base_url}/chat/completions",
+                    "source": name,
+                    "vision": True,
+                }
+            ]
+
+        with patch("book_to_latex.ollama_connection_info", return_value=ollama_info), patch(
+            "book_to_latex._openai_compatible_server_models", side_effect=server_models
+        ), patch(
+            "book_to_latex._local_model_file_inventory",
+            return_value=[{"name": "downloaded.gguf", "source": "LM Studio", "path": "/tmp/model"}],
+        ):
+            info = discover_local_ai()
+        self.assertTrue(info["available"])
+        self.assertEqual({model["source"] for model in info["models"]}, {"Ollama", "LM Studio"})
+        self.assertEqual(len(info["model_files"]), 1)
 
 
 class BroadInputTests(unittest.TestCase):

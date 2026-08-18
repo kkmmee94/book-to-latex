@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,7 @@ from email import policy
 from email.parser import BytesParser
 from pathlib import Path
 
+import certifi
 import xlrd
 from bs4 import BeautifulSoup
 from charset_normalizer import from_bytes
@@ -80,7 +82,13 @@ PHOTO_DESCRIBE = "describe"
 
 DEFAULT_OPENAI_COMPAT_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 DEFAULT_OLLAMA_ENDPOINT = "http://127.0.0.1:11434/api/chat"
-APP_VERSION = "1.3.1"
+OPENAI_MODELS_ENDPOINT = "https://api.openai.com/v1/models"
+OPENAI_RECOMMENDED_MODELS = (
+    "gpt-5.6-terra",
+    "gpt-5.6-sol",
+    "gpt-5.6-luna",
+)
+APP_VERSION = "1.3.2"
 GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/kkmmee94/book-to-latex/releases/latest"
 
 DOCUMENT_LANGUAGES = {
@@ -244,7 +252,7 @@ def ensure_ocr_language(
                 url,
                 headers={"User-Agent": f"book-to-latex/{APP_VERSION}"},
             )
-            with urllib.request.urlopen(request, timeout=120) as response:
+            with _urlopen(request, timeout=120) as response:
                 data = response.read(100 * 1024 * 1024 + 1)
             if not 100_000 < len(data) <= 100 * 1024 * 1024:
                 raise RuntimeError("Downloaded OCR language file has an unexpected size")
@@ -941,6 +949,16 @@ def _ensure_pillow() -> None:
         raise RuntimeError("Pillow is required for OCR. Install with `pip install Pillow`.")
 
 
+def _urlopen(request: urllib.request.Request | str, *, timeout: float):
+    """Open HTTP(S) URLs with a CA bundle that also works in packaged apps."""
+    url = request.full_url if isinstance(request, urllib.request.Request) else str(request)
+    if urllib.parse.urlsplit(url).scheme.lower() == "https":
+        context = ssl.create_default_context()
+        context.load_verify_locations(cafile=certifi.where())
+        return urllib.request.urlopen(request, timeout=timeout, context=context)
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
 def _find_tesseract() -> str | None:
     found = shutil.which("tesseract")
     if found:
@@ -966,6 +984,25 @@ def _find_ollama() -> str | None:
             Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Ollama/ollama.exe",
         ]
         for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+    elif sys.platform == "darwin":
+        candidates = [
+            Path("/Applications/Ollama.app/Contents/Resources/ollama"),
+            Path.home() / "Applications/Ollama.app/Contents/Resources/ollama",
+            Path.home() / ".ollama/bin/ollama",
+            Path("/opt/homebrew/bin/ollama"),
+            Path("/usr/local/bin/ollama"),
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+    else:
+        for candidate in (
+            Path.home() / ".local/bin/ollama",
+            Path("/usr/local/bin/ollama"),
+            Path("/snap/bin/ollama"),
+        ):
             if candidate.is_file():
                 return str(candidate)
     return None
@@ -1133,6 +1170,136 @@ def _ollama_base_url(endpoint: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+_OLLAMA_SERVER_PROCESS: subprocess.Popen | None = None
+
+
+def _start_ollama_server() -> bool:
+    """Start an installed Ollama server when its desktop app is not already running."""
+    global _OLLAMA_SERVER_PROCESS
+    executable = _find_ollama()
+    if not executable:
+        return False
+    options: dict[str, object] = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "stdin": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    else:
+        options["start_new_session"] = True
+    try:
+        _OLLAMA_SERVER_PROCESS = subprocess.Popen([executable, "serve"], **options)  # type: ignore[arg-type]
+        return True
+    except OSError:
+        return False
+
+
+def model_supports_vision(model_name: str) -> bool:
+    """Conservatively identify common local and hosted models that accept page images."""
+    lowered = model_name.lower()
+    return any(
+        token in lowered
+        for token in (
+            "vision",
+            "-vl",
+            "qwen3.5",
+            "qwen35",
+            "llava",
+            "moondream",
+            "minicpm-v",
+            "pixtral",
+            "gemma3",
+            "gpt-5",
+            "gpt-4o",
+            "gpt-4.1",
+        )
+    )
+
+
+def _local_model_file_inventory(limit: int = 100) -> list[dict[str, str]]:
+    """Find model files in well-known user model stores without scanning private folders."""
+    home = Path.home()
+    ollama_manifests = home / ".ollama/models/manifests"
+    found: list[dict[str, str]] = []
+    if ollama_manifests.is_dir():
+        try:
+            for manifest in ollama_manifests.rglob("*"):
+                if not manifest.is_file():
+                    continue
+                parts = manifest.relative_to(ollama_manifests).parts
+                if len(parts) >= 4:
+                    namespace, model_name, tag = parts[-3:]
+                    name = (
+                        f"{model_name}:{tag}"
+                        if namespace == "library"
+                        else f"{namespace}/{model_name}:{tag}"
+                    )
+                else:
+                    name = manifest.name
+                found.append({"name": name, "path": str(manifest), "source": "Ollama"})
+                if len(found) >= limit:
+                    return found
+        except OSError:
+            pass
+    roots = [
+        ("LM Studio", home / ".cache/lm-studio/models"),
+        ("LM Studio", home / ".lmstudio/models"),
+        ("LM Studio", home / "Library/Application Support/LM Studio/models"),
+        ("Hugging Face", home / ".cache/huggingface/hub"),
+        ("Hugging Face", home / "Library/Caches/huggingface/hub"),
+        ("GPT4All", home / "Library/Application Support/nomic.ai/GPT4All"),
+        ("GPT4All", home / ".cache/gpt4all"),
+    ]
+    extensions = {".gguf", ".safetensors", ".bin", ".mlx"}
+    for source, root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            for current_root, directories, filenames in os.walk(root):
+                relative_depth = len(Path(current_root).relative_to(root).parts)
+                if relative_depth >= 7:
+                    directories[:] = []
+                for filename in filenames:
+                    path = Path(current_root) / filename
+                    if path.suffix.lower() not in extensions:
+                        continue
+                    found.append({"name": path.stem, "path": str(path), "source": source})
+                    if len(found) >= limit:
+                        return found
+        except OSError:
+            continue
+    return found
+
+
+def _openai_compatible_server_models(
+    name: str,
+    base_url: str,
+    timeout: float,
+) -> list[dict[str, object]]:
+    request = urllib.request.Request(
+        f"{base_url.rstrip('/')}/models",
+        headers={"Accept": "application/json", "User-Agent": f"book-to-latex/{APP_VERSION}"},
+    )
+    with _urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    models: list[dict[str, object]] = []
+    for item in payload.get("data", []):
+        model_id = str(item.get("id") or "").strip() if isinstance(item, dict) else ""
+        if not model_id:
+            continue
+        models.append(
+            {
+                "name": model_id,
+                "provider": "openai",
+                "endpoint": f"{base_url.rstrip('/')}/chat/completions",
+                "source": name,
+                "vision": model_supports_vision(model_id),
+            }
+        )
+    return models
+
+
 def _version_tuple(version: str) -> tuple[int, ...]:
     numbers = re.findall(r"\d+", version.split("-", 1)[0])
     return tuple(int(number) for number in numbers[:4]) or (0,)
@@ -1148,7 +1315,7 @@ def check_for_updates(timeout: float = 8.0) -> dict[str, object]:
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
         latest = str(payload.get("tag_name") or "").lstrip("v")
         assets = [
@@ -1183,26 +1350,75 @@ def check_for_updates(timeout: float = 8.0) -> dict[str, object]:
 def ollama_connection_info(
     endpoint: str = DEFAULT_OLLAMA_ENDPOINT,
     timeout: float = 3.0,
+    *,
+    auto_start: bool = False,
 ) -> dict[str, object]:
     """Return Ollama availability and installed models without raising UI errors."""
     base_url = _ollama_base_url(endpoint)
-    try:
-        with urllib.request.urlopen(f"{base_url}/api/version", timeout=timeout) as response:
+
+    def load() -> tuple[dict[str, object], dict[str, object]]:
+        with _urlopen(f"{base_url}/api/version", timeout=timeout) as response:
             version_payload = json.loads(response.read().decode("utf-8"))
-        with urllib.request.urlopen(f"{base_url}/api/tags", timeout=timeout) as response:
+        with _urlopen(f"{base_url}/api/tags", timeout=timeout) as response:
             tags_payload = json.loads(response.read().decode("utf-8"))
+        return version_payload, tags_payload
+
+    try:
+        version_payload, tags_payload = load()
+    except Exception as first_error:  # noqa: BLE001
+        if auto_start and _start_ollama_server():
+            deadline = time.monotonic() + 8.0
+            while time.monotonic() < deadline:
+                time.sleep(0.4)
+                try:
+                    version_payload, tags_payload = load()
+                    break
+                except Exception:  # noqa: BLE001
+                    continue
+            else:
+                version_payload = {}
+                tags_payload = {}
+        else:
+            version_payload = {}
+            tags_payload = {}
+        if not version_payload:
+            return {
+                "available": False,
+                "base_url": base_url,
+                "version": "",
+                "models": [],
+                "executable": _find_ollama(),
+                "error": str(first_error),
+            }
+
+    try:
         models = []
         for model in tags_payload.get("models", []):
             name = str(model.get("name") or model.get("model") or "").strip()
             if not name:
                 continue
             details = model.get("details") or {}
+            vision = model_supports_vision(name)
+            try:
+                show_request = urllib.request.Request(
+                    f"{base_url}/api/show",
+                    data=json.dumps({"model": name}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with _urlopen(show_request, timeout=timeout) as response:
+                    show_payload = json.loads(response.read().decode("utf-8"))
+                capabilities = {str(value).lower() for value in show_payload.get("capabilities", [])}
+                vision = "vision" in capabilities or vision
+            except Exception:  # noqa: BLE001
+                pass
             models.append(
                 {
                     "name": name,
                     "size": int(model.get("size") or 0),
                     "parameter_size": str(details.get("parameter_size") or ""),
                     "quantization": str(details.get("quantization_level") or ""),
+                    "vision": vision,
                 }
             )
         models.sort(key=lambda item: str(item["name"]).lower())
@@ -1211,6 +1427,7 @@ def ollama_connection_info(
             "base_url": base_url,
             "version": str(version_payload.get("version") or ""),
             "models": models,
+            "executable": _find_ollama(),
             "error": None,
         }
     except Exception as exc:  # noqa: BLE001
@@ -1219,8 +1436,144 @@ def ollama_connection_info(
             "base_url": base_url,
             "version": "",
             "models": [],
+            "executable": _find_ollama(),
             "error": str(exc),
         }
+
+
+def discover_local_ai(
+    *,
+    timeout: float = 2.0,
+    auto_start_ollama: bool = False,
+) -> dict[str, object]:
+    """Discover ready local AI servers plus model files in common Mac/Windows/Linux stores."""
+    ready_models: list[dict[str, object]] = []
+    errors: list[str] = []
+    ollama = ollama_connection_info(timeout=timeout, auto_start=auto_start_ollama)
+    for item in ollama.get("models", []):
+        name = str(item.get("name") or "")
+        ready_models.append(
+            {
+                **item,
+                "name": name,
+                "provider": "ollama",
+                "endpoint": DEFAULT_OLLAMA_ENDPOINT,
+                "source": "Ollama",
+                "vision": bool(item.get("vision")) or model_supports_vision(name),
+            }
+        )
+    if ollama.get("error"):
+        errors.append(f"Ollama: {ollama['error']}")
+
+    servers = (
+        ("LM Studio", "http://127.0.0.1:1234/v1"),
+        ("Jan", "http://127.0.0.1:1337/v1"),
+        ("llama.cpp", "http://127.0.0.1:8080/v1"),
+        ("GPT4All", "http://127.0.0.1:4891/v1"),
+    )
+    for server_name, base_url in servers:
+        try:
+            ready_models.extend(_openai_compatible_server_models(server_name, base_url, timeout))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{server_name}: {exc}")
+
+    unique: dict[tuple[str, str], dict[str, object]] = {}
+    for item in ready_models:
+        unique[(str(item.get("endpoint")), str(item.get("name")))] = item
+    models = sorted(
+        unique.values(),
+        key=lambda item: (str(item.get("source", "")).lower(), str(item.get("name", "")).lower()),
+    )
+    model_files = _local_model_file_inventory()
+    return {
+        "available": bool(models),
+        "models": models,
+        "model_files": model_files,
+        "ollama": ollama,
+        "errors": errors,
+    }
+
+
+def openai_connection_info(api_key: str, timeout: float = 10.0) -> dict[str, object]:
+    """Validate an OpenAI API key and return recommended models available to it."""
+    key = api_key.strip() or os.environ.get("OPENAI_API_KEY", "").strip()
+    if not key:
+        return {
+            "available": False,
+            "models": [],
+            "error": "Paste an OpenAI API key first.",
+        }
+    request = urllib.request.Request(
+        OPENAI_MODELS_ENDPOINT,
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {key}",
+            "User-Agent": f"book-to-latex/{APP_VERSION}",
+        },
+    )
+    try:
+        with _urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        available_ids = {
+            str(item.get("id") or "")
+            for item in payload.get("data", [])
+            if isinstance(item, dict)
+        }
+        recommended = [model for model in OPENAI_RECOMMENDED_MODELS if model in available_ids]
+        if not recommended:
+            recommended = sorted(
+                model
+                for model in available_ids
+                if model_supports_vision(model) and not model.startswith("ft:")
+            )
+        return {
+            "available": True,
+            "models": recommended,
+            "all_model_ids": sorted(available_ids),
+            "error": None,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "models": [], "error": str(exc)}
+
+
+def install_recommended_local_model(
+    model: str = "qwen3.5:9b",
+    *,
+    timeout: float = 7200.0,
+) -> dict[str, object]:
+    """Download one Ollama model that handles both text and page images."""
+    executable = _find_ollama()
+    if not executable:
+        return {
+            "success": False,
+            "needs_ollama": True,
+            "model": model,
+            "error": "Ollama is not installed.",
+        }
+    ollama = ollama_connection_info(timeout=3.0, auto_start=True)
+    if not ollama.get("available"):
+        return {
+            "success": False,
+            "needs_ollama": False,
+            "model": model,
+            "error": f"Ollama could not start: {ollama.get('error')}",
+        }
+    try:
+        completed = subprocess.run(
+            [executable, "pull", model],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "needs_ollama": False, "model": model, "error": str(exc)}
+    if completed.returncode != 0:
+        error = (completed.stderr or completed.stdout or "Ollama download failed.").strip()
+        return {"success": False, "needs_ollama": False, "model": model, "error": error}
+    return {"success": True, "needs_ollama": False, "model": model, "error": None}
 
 
 def runtime_capabilities() -> dict[str, object]:
@@ -1659,6 +2012,9 @@ def _query_llm(
             "max_tokens": max_tokens,
             "stream": False,
         }
+        if urllib.parse.urlsplit(endpoint).hostname == "api.openai.com" and model.startswith("gpt-5"):
+            payload.pop("temperature", None)
+            payload["max_completion_tokens"] = payload.pop("max_tokens")
 
     attempts = 0
     while True:
@@ -1672,7 +2028,7 @@ def _query_llm(
                 headers=headers,
                 method="POST",
             )
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with _urlopen(request, timeout=timeout) as response:
                 payload_json = json.loads(response.read().decode("utf-8"))
             if ollama_native:
                 content = payload_json.get("message", {}).get("content")
@@ -1756,6 +2112,9 @@ def _query_visual_inventory(
             "max_tokens": 900,
             "stream": False,
         }
+        if urllib.parse.urlsplit(endpoint).hostname == "api.openai.com" and model.startswith("gpt-5"):
+            payload.pop("temperature", None)
+            payload["max_completion_tokens"] = payload.pop("max_tokens")
 
     attempts = 0
     while True:
@@ -1768,7 +2127,7 @@ def _query_visual_inventory(
                 headers=headers,
                 method="POST",
             )
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with _urlopen(request, timeout=timeout) as response:
                 response_json = json.loads(response.read().decode("utf-8"))
             if ollama_native:
                 content = str(response_json.get("message", {}).get("content") or "")
@@ -2879,13 +3238,19 @@ def _ensure_generated_preamble(output_path: Path) -> list[str]:
 
 
 def _repair_tikz_compatibility(output_path: Path) -> list[str]:
-    """Normalize two common vision-model TikZ mistakes."""
+    """Normalize common vision-model TikZ mistakes."""
     source = output_path.read_text(encoding="utf-8", errors="replace")
     repaired = source.replace(">=stealth'", ">=stealth")
     paired_range = "{0/0, 1/1, ..., 8/8}"
     expanded_paired_range = "{" + ", ".join(f"{value}/{value}" for value in range(9)) + "}"
     paired_range_count = repaired.count(paired_range)
     repaired = repaired.replace(paired_range, expanded_paired_range)
+    repaired, extended_paired_range_count = re.subn(
+        r"\{0/0,\s*1/1,\s*\.\.\.,\s*8/8,\s*9/9\}",
+        "{" + ", ".join(f"{value}/{value}" for value in range(10)) + "}",
+        repaired,
+    )
+    paired_range_count += extended_paired_range_count
     normal_cdf_pattern = r"0\.5\*\(1\+erf\(\\x/sqrt\(2\)\)\)"
     repaired, normal_cdf_count = re.subn(
         normal_cdf_pattern,
@@ -2899,10 +3264,70 @@ def _repair_tikz_compatibility(output_path: Path) -> list[str]:
         repaired,
     )
     color_name_count += lavender_count
+    repaired, lightyellow_count = re.subn(r"\blightyellow(?=[!,}\]])", "yellow", repaired)
+    color_name_count += lightyellow_count
     repaired, undefined_tick_count = re.subn(r"\(\\tickx\s*,", "(0,", repaired)
     repaired, tick_key_count = re.subn(
         r",\s*[xy]tick\s+distance\s*=\s*[-+]?\d*\.?\d+",
         "",
+        repaired,
+    )
+    repaired, triangle_shape_count = re.subn(
+        r"(\[(?:[^\[\]]*,\s*)?)triangle(?=\s*(?:,|\]))",
+        r"\1regular polygon, regular polygon sides=3",
+        repaired,
+    )
+    repaired, horizontal_grid_count = re.subn(
+        r"\\draw\[dashed\]\s*\(0,\s*\\y/2\s*\+\s*1\)\s*--\s*"
+        r"\(\\x/2\.5\s*-\s*50/2\.5,\s*\\y/2\s*\+\s*1\);",
+        r"\\draw[dashed] (0, \\y/2 + 1) -- (12, \\y/2 + 1);",
+        repaired,
+    )
+    repaired, pgf_axis_endpoint_count = re.subn(
+        r"\(\s*\\pgfkeysvalueof\{[^{}]*\}(?:\{[^{}]*\})?\s*,\s*\\y\s*\)",
+        r"(12,\\y)",
+        repaired,
+    )
+    repaired, placeholder_plot_count = re.subn(
+        r"\\draw\[([^\]]+)\]\s+plot\s+coordinates\s*\{\(([^)]+)\)\s*\.\.\.\s*\};",
+        r"\\fill[\1] (\2) circle (2pt);",
+        repaired,
+    )
+
+    def replace_marker_shape(match: re.Match[str]) -> str:
+        color, coordinate, shape, size = match.groups()
+        if shape == "cross":
+            return f"\\node[{color}] at ({coordinate}) {{\\scriptsize$\\times$}};"
+        if shape == "diamond":
+            options = f"diamond, draw={color}, fill={color}, inner sep={size}"
+        else:
+            rotations = {"triangle up": "0", "triangle right": "90", "triangle down": "180"}
+            options = (
+                f"regular polygon, regular polygon sides=3, rotate={rotations[shape]}, "
+                f"draw={color}, fill={color}, inner sep={size}"
+            )
+        return f"\\node[{options}] at ({coordinate}) {{}};"
+
+    repaired, marker_shape_count = re.subn(
+        r"\\fill\[([^\]]+)\]\s*\(([^)]+)\)\s*"
+        r"(diamond|triangle up|triangle right|triangle down|cross)\s*\(([^)]+)\);",
+        replace_marker_shape,
+        repaired,
+    )
+    if (triangle_shape_count or marker_shape_count) and r"\usetikzlibrary{shapes.geometric}" not in repaired:
+        repaired = repaired.replace(
+            r"\begin{document}",
+            "\\usetikzlibrary{shapes.geometric}\n\\begin{document}",
+            1,
+        )
+    repaired, invalid_legend_position_count = re.subn(
+        r"\(10,\s*\\dimexpr\s*7-\\listcounter\\pgfkeysvalueof\{[^{}]+\}\)",
+        "(10,6)",
+        repaired,
+    )
+    repaired, text_marker_math_count = re.subn(
+        r"\\textcolor\{([^{}]+)\}\{\\times\}",
+        r"\\textcolor{\1}{$\\times$}",
         repaired,
     )
     repaired, undefined_series_count = re.subn(
@@ -2920,6 +3345,8 @@ def _repair_tikz_compatibility(output_path: Path) -> list[str]:
         repaired,
     )
     repaired, comment_count = re.subn(r"(?m)^(\s*)\\%(?=\s*[A-Za-z])", r"\1%", repaired)
+    repaired, inline_comment_count = re.subn(r";\s*\\%(?=\s*[A-Za-z])", "; %", repaired)
+    comment_count += inline_comment_count
     repairs: list[str] = []
     if ">=stealth'" in source:
         repairs.append("Updated a legacy TikZ arrow style")
@@ -2939,6 +3366,20 @@ def _repair_tikz_compatibility(output_path: Path) -> list[str]:
         repairs.append(f"Expanded {paired_range_count} invalid paired TikZ range(s)")
     if normal_cdf_count:
         repairs.append(f"Replaced {normal_cdf_count} unsupported PGF normal-CDF expression(s)")
+    if triangle_shape_count:
+        repairs.append(f"Repaired {triangle_shape_count} unsupported TikZ triangle shape(s)")
+    if marker_shape_count:
+        repairs.append(f"Repaired {marker_shape_count} unsupported TikZ marker shape(s)")
+    if invalid_legend_position_count:
+        repairs.append(f"Repaired {invalid_legend_position_count} invalid TikZ legend position(s)")
+    if text_marker_math_count:
+        repairs.append(f"Repaired {text_marker_math_count} text-mode mathematical marker(s)")
+    if horizontal_grid_count:
+        repairs.append(f"Repaired {horizontal_grid_count} undefined TikZ grid endpoint(s)")
+    if pgf_axis_endpoint_count:
+        repairs.append(f"Repaired {pgf_axis_endpoint_count} invalid PGF axis endpoint(s)")
+    if placeholder_plot_count:
+        repairs.append(f"Repaired {placeholder_plot_count} incomplete TikZ plot placeholder(s)")
     if repairs:
         output_path.write_text(repaired, encoding="utf-8")
     return repairs

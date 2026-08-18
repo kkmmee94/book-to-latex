@@ -26,7 +26,8 @@ from book_to_latex import (
     PHOTO_KEEP,
     check_for_updates,
     convert_book_to_latex,
-    ollama_connection_info,
+    discover_local_ai,
+    model_supports_vision,
     runtime_capabilities,
 )
 
@@ -36,9 +37,15 @@ LOOK_EXACT = "Keep original pages unchanged"
 COLOUR_KEEP = "Keep the original colours"
 COLOUR_MONO = "Black and white"
 AI_AUTO = "Automatic (recommended)"
-AI_OLLAMA = "Choose an installed Ollama model"
-AI_OPENAI = "Use an OpenAI-compatible service"
-AI_NONE = "Do not use AI"
+AI_OLLAMA = "Local AI — private on this computer"
+AI_OPENAI = "OpenAI — online"
+AI_NONE = "Basic conversion without AI"
+
+OPENAI_MODEL_LABELS = {
+    "Balanced quality and cost — GPT-5.6 Terra (recommended)": "gpt-5.6-terra",
+    "Best quality — GPT-5.6 Sol": "gpt-5.6-sol",
+    "Lower cost — GPT-5.6 Luna": "gpt-5.6-luna",
+}
 
 PAGE_SIZE_LABELS = {
     "Same size as the original": PAGE_SIZE_SOURCE,
@@ -105,15 +112,11 @@ def _zip_finished_project(result: dict[str, object]) -> bytes:
 
 @st.cache_data(ttl=5, show_spinner=False)
 def _local_ai_info() -> dict[str, object]:
-    return ollama_connection_info(timeout=4.0)
+    return discover_local_ai(timeout=2.0, auto_start_ollama=True)
 
 
 def _looks_visual(model_name: str) -> bool:
-    lowered = model_name.lower()
-    return any(
-        token in lowered
-        for token in ("vision", "-vl", "qwen3.5", "qwen35", "llava", "gpt-4o", "gpt-4.1")
-    )
+    return model_supports_vision(model_name)
 
 
 def _find_text_model(models: list[str]) -> str | None:
@@ -124,7 +127,7 @@ def _find_text_model(models: list[str]) -> str | None:
     ):
         if preferred in models:
             return preferred
-    return next((model for model in models if not _looks_visual(model)), None)
+    return next((model for model in models if not _looks_visual(model)), models[0] if models else None)
 
 
 def _find_vision_model(models: list[str]) -> str | None:
@@ -156,7 +159,7 @@ with st.expander("How it works"):
 4. Choose whether real photographs stay visible or become written descriptions.
 5. Select **Create LaTeX and PDF**.
 
-The result includes the LaTeX file, compiled PDF and a quality-check report. Technical controls are hidden in Advanced settings.
+The result includes the LaTeX file, compiled PDF and a quality-check report. Technical controls are hidden in More settings.
 """
     )
 
@@ -173,14 +176,24 @@ input_extension = Path(safe_upload_name).suffix.lower()
 input_is_visual = input_extension == ".pdf" or input_extension in IMAGE_EXTENSIONS
 capabilities = runtime_capabilities()
 ai_info = _local_ai_info()
-local_models = [str(model["name"]) for model in (ai_info.get("models") or [])]
+local_model_records = [dict(model) for model in (ai_info.get("models") or [])]
+local_model_by_label = {
+    f"{model.get('name')} — {model.get('source', 'Local AI')}, {'text + images' if model.get('vision') else 'text'}": model
+    for model in local_model_records
+}
+local_models = [str(model.get("name") or "") for model in local_model_records]
+local_model_by_name = {str(model.get("name") or ""): model for model in local_model_records}
 text_model = _find_text_model(local_models)
 vision_model = _find_vision_model(local_models)
 
 if "book-latex-qwen3-local-uncensored:8b" in local_models:
     st.success("UNCENSORED local Qwen3 model ready · Vision AI, OCR and PDF compilation ready")
 elif local_models:
-    st.success("Local AI, OCR and PDF compilation are ready")
+    st.success(f"Found {len(local_models)} ready local model(s); OCR and PDF compilation are ready")
+elif ai_info.get("model_files"):
+    st.warning(
+        f"Found {len(ai_info['model_files'])} local model file(s), but their local AI app/server is not running. Start Ollama, LM Studio, Jan, GPT4All, or llama.cpp and refresh."
+    )
 else:
     st.warning("No local AI model was detected. Clean basic conversion remains available.")
 
@@ -248,7 +261,7 @@ default_suffix = {
 }[look]
 default_output_name = f"{Path(safe_upload_name).stem}{default_suffix}"
 
-with st.expander("Advanced settings — optional"):
+with st.expander("More settings — optional"):
     st.caption("Most people should leave these settings unchanged.")
     output_dir = st.text_input(
         "Save folder on this computer",
@@ -257,19 +270,30 @@ with st.expander("Advanced settings — optional"):
     )
     output_name = st.text_input("LaTeX filename", value=default_output_name)
     ai_choice = st.selectbox(
-        "AI choice",
+        "AI service",
         [AI_AUTO, AI_OLLAMA, AI_OPENAI, AI_NONE],
-        help="Automatic picks the text or vision model based on the selected appearance.",
+        help="Automatic chooses a ready local model. OpenAI already provides simple model choices; you never type a model name.",
     )
     selected_model = ""
+    selected_local = None
     endpoint = DEFAULT_OLLAMA_ENDPOINT
     api_key = ""
     if ai_choice == AI_OLLAMA:
-        selected_model = st.selectbox("Installed Ollama model", local_models) if local_models else st.text_input("Ollama model")
+        if local_model_by_label:
+            selected_local = local_model_by_label[st.selectbox("Detected local model", list(local_model_by_label))]
+            selected_model = str(selected_local.get("name") or "")
+        else:
+            st.info("No ready local model was found. Start a local AI app/server, then refresh below.")
     elif ai_choice == AI_OPENAI:
-        selected_model = st.text_input("Online model name")
-        endpoint = st.text_input("Connection address", value=DEFAULT_OPENAI_COMPAT_ENDPOINT)
-        api_key = st.text_input("API key", type="password")
+        openai_model_label = st.selectbox("OpenAI model", list(OPENAI_MODEL_LABELS))
+        selected_model = OPENAI_MODEL_LABELS[openai_model_label]
+        endpoint = DEFAULT_OPENAI_COMPAT_ENDPOINT
+        api_key = st.text_input(
+            "OpenAI API key",
+            type="password",
+            help="Create a private key at https://platform.openai.com/api-keys and paste it here. The app has already chosen the model and address.",
+        )
+        st.link_button("Get an OpenAI API key", "https://platform.openai.com/api-keys")
     if st.button("Refresh installed local models"):
         _local_ai_info.clear()
         st.rerun()
@@ -302,6 +326,7 @@ if "output_dir" not in locals():
     output_name = default_output_name
     ai_choice = AI_AUTO
     selected_model = ""
+    selected_local = None
     endpoint = DEFAULT_OLLAMA_ENDPOINT
     api_key = ""
     start_page = 1
@@ -330,21 +355,42 @@ if look == LOOK_EXACT or ai_choice == AI_NONE:
     provider, model, endpoint, no_llm, vision_mode = "openai", "", DEFAULT_OPENAI_COMPAT_ENDPOINT, True, False
 elif ai_choice == AI_OPENAI:
     provider, model, no_llm = "openai", selected_model.strip(), False
-    vision_mode = look == LOOK_CLOSE and _looks_visual(model)
+    endpoint = DEFAULT_OPENAI_COMPAT_ENDPOINT
+    vision_mode = look == LOOK_CLOSE
+    if not api_key.strip():
+        st.error("OpenAI needs one API key. Use Get an OpenAI API key above, then paste it into the key box; the model is already selected.")
+        st.stop()
 elif ai_choice == AI_OLLAMA:
-    provider, model, endpoint, no_llm = "ollama", selected_model.strip(), DEFAULT_OLLAMA_ENDPOINT, False
-    vision_mode = look == LOOK_CLOSE and _looks_visual(model)
+    if not selected_local:
+        st.error("No ready local model is selected. Start Ollama, LM Studio, Jan, GPT4All, or llama.cpp, then refresh.")
+        st.stop()
+    provider = str(selected_local.get("provider") or "ollama")
+    model = str(selected_local.get("name") or "")
+    endpoint = str(selected_local.get("endpoint") or DEFAULT_OLLAMA_ENDPOINT)
+    api_key = ""
+    no_llm = False
+    vision_mode = look == LOOK_CLOSE and bool(selected_local.get("vision"))
 elif look == LOOK_CLOSE:
     if not vision_model:
-        st.error("Enhancing a scan or lecture needs the local vision model. Run setup_local_model.bat first.")
+        st.error(
+            "Enhanced pages need AI that can read images. Choose OpenAI and paste one API key, or start/install a local vision model and refresh. No model name or connection address is required."
+        )
         st.stop()
-    provider, model, endpoint, no_llm, vision_mode = "ollama", vision_model, DEFAULT_OLLAMA_ENDPOINT, False, True
+    automatic_local = local_model_by_name[vision_model]
+    provider = str(automatic_local.get("provider") or "ollama")
+    model = vision_model
+    endpoint = str(automatic_local.get("endpoint") or DEFAULT_OLLAMA_ENDPOINT)
+    api_key, no_llm, vision_mode = "", False, True
 else:
-    provider, model, endpoint = "ollama", text_model or "", DEFAULT_OLLAMA_ENDPOINT
+    automatic_local = local_model_by_name.get(text_model or "")
+    provider = str(automatic_local.get("provider") or "ollama") if automatic_local else "ollama"
+    model = text_model or ""
+    endpoint = str(automatic_local.get("endpoint") or DEFAULT_OLLAMA_ENDPOINT) if automatic_local else DEFAULT_OLLAMA_ENDPOINT
+    api_key = ""
     no_llm, vision_mode = not bool(text_model), False
 
 if not no_llm and not model:
-    st.error("The selected AI choice needs a model name.")
+    st.error("The selected AI service is not ready. Choose a detected local model or OpenAI.")
     st.stop()
 if look == LOOK_CLOSE and not vision_mode and not no_llm:
     st.error("Enhancing a scan or lecture requires a vision-capable model.")

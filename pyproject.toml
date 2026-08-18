@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "book-to-latex"
-version = "1.3.1"
+version = "1.3.2"
 description = "Friendly desktop, browser, and CLI tools for converting documents into LaTeX and compiled PDF"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,6 +28,7 @@ classifiers = [
 ]
 dependencies = [
   "pypdf>=6.0,<7",
+  "certifi>=2025.8.3",
   "Pillow>=10.4,<13",
   "pillow-heif>=1.0,<2",
   "PyMuPDF>=1.25,<2",
