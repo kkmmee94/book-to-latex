@@ -2,7 +2,7 @@
 set -euo pipefail
 
 project_root="$(cd "$(dirname "$0")/../.." && pwd)"
-version="${1:-1.2.0}"
+version="${1:-1.3.0}"
 volume_root="$project_root/build/macos-dmg"
 dmg_path="$project_root/dist/Book-to-LaTeX-${version}-macOS.dmg"
 

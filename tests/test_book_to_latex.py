@@ -16,6 +16,7 @@ from openpyxl import Workbook
 from pptx import Presentation
 
 from book_to_latex import (
+    APP_VERSION,
     DEFAULT_OLLAMA_ENDPOINT,
     PAGE_FLOW_COMPACT,
     PAGE_FLOW_SOURCE,
@@ -24,6 +25,7 @@ from book_to_latex import (
     PHOTO_KEEP,
     ConversionCancelled,
     _compile_latex,
+    _detect_language_from_text,
     _escape_latex,
     _latex_to_plain,
     _numeric_comparison,
@@ -31,14 +33,77 @@ from book_to_latex import (
     _query_llm,
     _read_document_pages,
     analyze_pdf,
+    check_for_updates,
     convert_book_to_latex,
+    ensure_ocr_language,
     runtime_capabilities,
 )
 
 SAMPLE_TEXT = "Title & cost 50% — 5°\n\nA_b #1 and {braces}"
 
 
+class UpdateTests(unittest.TestCase):
+    def test_update_check_compares_public_release_version(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps(
+                    {
+                        "tag_name": "v99.0.0",
+                        "html_url": "https://github.com/kkmmee94/book-to-latex/releases/tag/v99.0.0",
+                        "assets": [
+                            {
+                                "name": "Book-to-LaTeX-Setup.exe",
+                                "browser_download_url": "https://example.invalid/installer.exe",
+                            }
+                        ],
+                    }
+                ).encode("utf-8")
+
+        with patch("book_to_latex.urllib.request.urlopen", return_value=FakeResponse()):
+            result = check_for_updates()
+        self.assertEqual(result["current_version"], APP_VERSION)
+        self.assertEqual(result["latest_version"], "99.0.0")
+        self.assertTrue(result["update_available"])
+        self.assertEqual(result["assets"][0]["name"], "Book-to-LaTeX-Setup.exe")
+
+
 class TextConversionTests(unittest.TestCase):
+    def test_chinese_text_is_detected_without_an_english_assumption(self) -> None:
+        self.assertEqual(_detect_language_from_text("这是一个中文讲义测试。统计学课程。"), "chi_sim")
+
+    def test_missing_ocr_language_is_downloaded_to_user_data(self) -> None:
+        class FakeLanguageResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size: int = -1) -> bytes:
+                return b"trained-language-data" * 10_000
+
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "book_to_latex._user_tessdata_dir",
+            return_value=Path(temporary),
+        ), patch(
+            "book_to_latex.pytesseract.get_languages",
+            return_value=["eng", "osd"],
+        ), patch(
+            "book_to_latex.urllib.request.urlopen",
+            return_value=FakeLanguageResponse(),
+        ):
+            ready = ensure_ocr_language("chi_sim")
+            installed = Path(temporary) / "chi_sim.traineddata"
+            self.assertEqual(ready, ["chi_sim"])
+            self.assertTrue(installed.is_file())
+            self.assertGreater(installed.stat().st_size, 100_000)
+
     def test_arabic_ocr_data_is_available_to_the_app(self) -> None:
         self.assertIn("ara", runtime_capabilities()["ocr_languages"])
 
@@ -191,6 +256,31 @@ class TextConversionTests(unittest.TestCase):
             self.assertTrue(any("multirow" in repair for repair in result["repairs"]))
             self.assertTrue(any("TikZ" in repair for repair in result["repairs"]))
 
+    def test_compile_repairs_floats_inside_one_page_boxes(self) -> None:
+        if not shutil.which("pdflatex"):
+            self.skipTest("pdflatex is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "boxed-float.tex"
+            output.write_text(
+                r"""\documentclass{article}
+\usepackage{float}
+\usepackage{adjustbox}
+\begin{document}
+\begin{adjustbox}{max width=\textwidth,max totalheight=.9\textheight}
+\begin{minipage}{\textwidth}
+\begin{figure}[h]
+\centering\rule{3cm}{2cm}
+\end{figure}
+\end{minipage}
+\end{adjustbox}
+\end{document}
+""",
+                encoding="utf-8",
+            )
+            result = _compile_latex(output, None)
+            self.assertTrue(result["success"], result)
+            self.assertTrue(any("non-floating" in repair for repair in result["repairs"]))
+
     def test_arabic_uses_rtl_xelatex_and_compiles(self) -> None:
         if not shutil.which("xelatex"):
             self.skipTest("xelatex is not installed")
@@ -211,6 +301,35 @@ class TextConversionTests(unittest.TestCase):
             self.assertIn(r"\setdefaultlanguage{arabic}", tex)
             self.assertEqual(result["compilation"]["compiler"], "xelatex")
             self.assertTrue(result["compilation"]["success"], result["compilation"])
+
+    def test_chinese_uses_unicode_xelatex_when_ctex_is_available(self) -> None:
+        if not shutil.which("xelatex") or not shutil.which("kpsewhich"):
+            self.skipTest("XeLaTeX is not installed")
+        ctex = subprocess.run(
+            ["kpsewhich", "ctex.sty"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        if ctex.returncode != 0 or not ctex.stdout.strip():
+            self.skipTest("CTeX is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "chinese.txt"
+            output = root / "chinese.tex"
+            source.write_text("统计学课程：这是一个中文讲义测试。", encoding="utf-8")
+            result = convert_book_to_latex(
+                input_path=source,
+                output_path=output,
+                no_llm=True,
+                document_language="chi_sim",
+                compile_pdf=True,
+                no_review=True,
+            )
+            self.assertTrue(result["compilation"]["success"], result["compilation"])
+            tex = output.read_text(encoding="utf-8")
+            self.assertIn("{ctex}", tex)
 
     def test_ai_failure_uses_safe_fallback_and_marks_review(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, patch(

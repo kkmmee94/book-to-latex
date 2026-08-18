@@ -14,7 +14,7 @@ The app checks automatically whether a PDF page has readable text and uses OCR o
 2. Select **Choose file…**.
 3. Select the file you want to convert. The chooser includes an **All files** option.
 4. The app suggests a filename ending in `_latex.tex`. Change it only if desired.
-5. Choose **Clean and editable**, **Stay close to the original layout**, or **Exact visual copy**.
+5. Choose **Reconstruct and polish**, **Enhance a scan or lecture**, or **Keep original pages unchanged**. The main names include Arabic translations.
 6. Choose the finished page size: same as the source, A4, or US Letter.
 7. For editable modes, choose compact flow or keep every source page separate.
 8. Choose whether real photographs stay visible or become descriptions.
@@ -42,17 +42,17 @@ Before the optional LLM is called, the app extracts readable text, slide content
 
 ## Understanding the three output styles
 
-### Clean and editable
+### Reconstruct and polish — إعادة بناء محسّنة
 
 Use this for almost every manuscript. The generated words are actual LaTeX text that can be edited, searched, copied, and restyled.
 
 This mode tries to preserve content, not exact typography or page coordinates. PDF text extraction does not reliably expose every font, column, margin, or floating picture.
 
-### Stay close to the original layout
+### Enhance a scan or lecture — تحسين المسح أو المحاضرة
 
 This automatically uses the installed vision model. It reads the rendered page image together with layout-preserved extracted text and reconstructs mathematics, tables, columns, colors and structure as editable LaTeX. It aims to stay close, but it is not an identical copy; exact coordinates and fonts are not guaranteed.
 
-### Exact visual copy
+### Keep original pages unchanged — الصفحات الأصلية دون تغيير
 
 For PDFs, this places each original PDF page directly into the LaTeX output. It preserves shapes, colors, headers, footers, photographs and the entire page image. It does not create a folder containing hundreds of temporary page pictures. Use it when appearance is more important than editing.
 
@@ -83,7 +83,7 @@ Temporary page renders and unused extracted images are deleted. Required `_asset
 
 ## Technical controls are optional
 
-The main window intentionally hides model names, endpoints, OCR switches, token limits, retries and matching percentages. Select **Advanced settings** only if you need a page range, poetry line-break preservation, another AI service, a custom style guide, or graph redrawing.
+The main window intentionally hides model names, endpoints, OCR switches, token limits, retries and matching percentages. Select **Advanced settings** only if you need a page range, poetry line-break preservation, another AI service, a custom style guide, or graph controls.
 
 ## Understanding conversion methods
 
@@ -116,7 +116,7 @@ The result depends on the selected model and available computer memory. Always i
 
 Select **Let a vision AI inspect each PDF/image page** with a model whose name contains `vision`, `VL`, or `qwen3.5`. The app sends a rendered page picture alongside layout-preserved text. This lets the model interpret stacked fractions, summation limits, superscripts, matrices, cases, diagrams, and columns that plain text extraction damages.
 
-The text-only local Qwen3 models cannot inspect images. **Stay close to the original layout** automatically uses the installed Qwen3.5 vision model.
+The text-only local Qwen3 models cannot inspect images. **Enhance a scan or lecture** automatically uses the installed Qwen3.5 vision model.
 
 ### Project style guide
 
@@ -160,10 +160,17 @@ The main window currently offers:
 
 | Language | Code |
 |---|---|
+| Detect automatically | `auto` |
 | English | `eng` |
 | Arabic | `ara` |
+| Chinese (Simplified) | `chi_sim` |
+| Chinese (Traditional) | `chi_tra` |
 
-Choose the language already used in the source. The app preserves it; it does not translate. Arabic automatically enables right-to-left LaTeX, Unicode Arabic, bundled Arabic OCR data, and XeLaTeX compilation.
+Automatic detection is recommended. The app detects Arabic and Chinese scripts from embedded text or a scanned page. If the matching official Tesseract data is missing, it downloads it once to the user's application-data folder. Arabic automatically enables RTL XeLaTeX; Chinese uses Unicode XeLaTeX/CTeX. The app preserves the language and does not translate it.
+
+## Checking for updates
+
+Select **Check for updates — التحقق من التحديثات**. The app reads the public GitHub latest-release record, compares it with the installed version, and offers to open the official download page when a newer version exists. It never silently replaces the running application.
 
 ## Quality options
 

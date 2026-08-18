@@ -12,9 +12,9 @@ from pathlib import Path
 import streamlit as st
 
 from book_to_latex import (
+    APP_VERSION,
     DEFAULT_OLLAMA_ENDPOINT,
     DEFAULT_OPENAI_COMPAT_ENDPOINT,
-    DOCUMENT_LANGUAGES,
     IMAGE_EXTENSIONS,
     MATCH_MODE_PERCENT,
     PAGE_FLOW_COMPACT,
@@ -24,14 +24,15 @@ from book_to_latex import (
     PAGE_SIZE_SOURCE,
     PHOTO_DESCRIBE,
     PHOTO_KEEP,
+    check_for_updates,
     convert_book_to_latex,
     ollama_connection_info,
     runtime_capabilities,
 )
 
-LOOK_CLEAN = "Clean and editable (recommended)"
-LOOK_CLOSE = "Stay close to the original layout"
-LOOK_EXACT = "Exact visual copy"
+LOOK_CLEAN = "Reconstruct and polish (fully editable) — إعادة بناء محسّنة"
+LOOK_CLOSE = "Enhance a scan or lecture — تحسين المسح أو المحاضرة"
+LOOK_EXACT = "Keep original pages unchanged — الصفحات الأصلية دون تغيير"
 COLOUR_KEEP = "Keep the original colours"
 COLOUR_MONO = "Black and white"
 AI_AUTO = "Automatic (recommended)"
@@ -51,6 +52,13 @@ PAGE_FLOW_LABELS = {
 PHOTO_LABELS = {
     "Keep real photographs": PHOTO_KEEP,
     "Replace photographs with descriptions": PHOTO_DESCRIBE,
+}
+LANGUAGE_LABELS = {
+    "Detect automatically — اكتشاف تلقائي": "auto",
+    "English — الإنجليزية": "eng",
+    "Arabic — العربية": "ara",
+    "Chinese (Simplified) — الصينية المبسطة": "chi_sim",
+    "Chinese (Traditional) — الصينية التقليدية": "chi_tra",
 }
 
 def _read_csv_rows(path: Path) -> list[dict]:
@@ -129,12 +137,21 @@ def _find_vision_model(models: list[str]) -> str | None:
 st.set_page_config(page_title="Book to LaTeX & PDF", page_icon="📘", layout="wide")
 st.title("📘 Book → LaTeX & PDF")
 st.caption("Choose how the finished result should look. OCR, AI, checking and PDF compilation happen automatically.")
+if st.button(f"Check for updates — التحقق من التحديثات (v{APP_VERSION})"):
+    update_info = check_for_updates(timeout=10)
+    if not update_info.get("success"):
+        st.error(f"Could not check GitHub: {update_info.get('error')}")
+    elif update_info.get("update_available"):
+        st.warning(f"Version {update_info['latest_version']} is available.")
+        st.link_button("Open official download page", str(update_info["release_url"]))
+    else:
+        st.success(f"Version {APP_VERSION} is up to date.")
 
 with st.expander("How it works"):
     st.markdown(
         """
 1. Choose the original file.
-2. Choose **Clean and editable**, **Stay close to the original**, or **Exact visual copy**.
+2. Choose **Reconstruct and polish**, **Enhance a scan or lecture**, or **Keep original pages unchanged**.
 3. Choose page size and compact or source-page flow.
 4. Choose whether real photographs stay visible or become written descriptions.
 5. Select **Create LaTeX and PDF**.
@@ -174,14 +191,14 @@ look = st.radio(
     label_visibility="collapsed",
 )
 look_descriptions = {
-    LOOK_CLEAN: "Best for novels, poetry and documents you want to edit. Creates clean readable LaTeX without copying every page position.",
-    LOOK_CLOSE: "Vision AI recreates editable mathematics, tables, graphs, diagrams, colors, headers, footers and page structure. Real photographs follow your Keep or Describe choice.",
-    LOOK_EXACT: "Places each original page directly into LaTeX with colors, shapes, headers, footers and photographs unchanged. Exact copy is always one source page per output page.",
+    LOOK_CLEAN: "Rebuilds every word as polished editable LaTeX. The app improves page design, tables and spacing rather than copying them.",
+    LOOK_CLOSE: "Enhances scans and lecture notes while keeping their recognizable structure, mathematics, visuals and meaningful page elements.",
+    LOOK_EXACT: "Keeps each original page visually unchanged. Existing searchable text remains searchable, but the LaTeX text is not reconstructed.",
 }
 st.info(look_descriptions[look])
 
 if look == LOOK_EXACT and not input_is_visual:
-    st.error("Exact visual copy is available for PDFs and images. Choose another appearance.")
+    st.error("Keeping original pages unchanged is available for PDFs and images. Choose another result type.")
 
 st.subheader("3. Page, language and pictures")
 left, right = st.columns(2)
@@ -190,7 +207,7 @@ with left:
         "Colour",
         [COLOUR_KEEP] if look == LOOK_EXACT else [COLOUR_KEEP, COLOUR_MONO],
         horizontal=True,
-        help="Close-layout mode reproduces visual colors. Exact copy always keeps source colors.",
+        help="Enhanced mode reproduces visual colors. Original-pages mode always keeps source colors.",
     )
     page_size_label = st.selectbox(
         "Finished page size",
@@ -199,11 +216,11 @@ with left:
         help="Same size preserves the source PDF shape. A4 or US Letter places the result on that paper size.",
     )
 with right:
-    language_labels = {label: code for code, label in DOCUMENT_LANGUAGES.items()}
+    language_labels = LANGUAGE_LABELS
     language_label = st.selectbox(
         "Document language",
         list(language_labels),
-        help="Arabic automatically enables right-to-left LaTeX, Arabic OCR and XeLaTeX. The app preserves the original language and does not translate it.",
+        help="Automatic detection is recommended. Missing official Arabic or Chinese Tesseract data is downloaded once and reused. The app preserves the source language and does not translate it.",
     )
     if look == LOOK_EXACT:
         page_flow_label = "Keep every source page separate"
@@ -221,7 +238,7 @@ photo_label = st.selectbox(
     disabled=look == LOOK_EXACT,
     help="Keep photographs as required project assets or replace them with descriptions. Graphs, tables, equations and technical diagrams are recreated as editable LaTeX either way.",
 )
-st.caption("Graphs, tables, equations and technical diagrams are recreated as editable LaTeX automatically in close-layout mode.")
+st.caption("Graphs, tables, equations and technical diagrams are recreated as editable LaTeX automatically in enhanced mode.")
 
 default_output_dir = str(Path.cwd())
 default_suffix = {
@@ -319,7 +336,7 @@ elif ai_choice == AI_OLLAMA:
     vision_mode = look == LOOK_CLOSE and _looks_visual(model)
 elif look == LOOK_CLOSE:
     if not vision_model:
-        st.error("The close-layout option needs the local vision model. Run setup_local_model.bat first.")
+        st.error("Enhancing a scan or lecture needs the local vision model. Run setup_local_model.bat first.")
         st.stop()
     provider, model, endpoint, no_llm, vision_mode = "ollama", vision_model, DEFAULT_OLLAMA_ENDPOINT, False, True
 else:
@@ -330,7 +347,7 @@ if not no_llm and not model:
     st.error("The selected AI choice needs a model name.")
     st.stop()
 if look == LOOK_CLOSE and not vision_mode and not no_llm:
-    st.error("Stay close to the original requires a vision-capable model.")
+    st.error("Enhancing a scan or lecture requires a vision-capable model.")
     st.stop()
 
 clean_output_name = Path(output_name.strip() or default_output_name).name

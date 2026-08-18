@@ -23,9 +23,9 @@ Temporary page renders are deleted automatically. Required visual assets remain 
 
 | Choice | Use it for | Result |
 |---|---|---|
-| **Clean and editable** | prose, poetry, essays, reports | clean, searchable LaTeX that is easy to edit |
-| **Stay close to the original layout** | mathematics, tables, slides, and structured pages | vision-assisted editable reconstruction; it is not an identical copy |
-| **Exact visual copy** | documents that must look identical | original PDF pages are placed directly into LaTeX with their shapes, colors, headers, footers and images unchanged |
+| **Reconstruct and polish — إعادة بناء محسّنة** | prose, reports, books and fully editable documents | exact wording in a professionally redesigned LaTeX document |
+| **Enhance a scan or lecture — تحسين المسح أو المحاضرة** | scanned lectures, notes, mathematics and older documents | clearer editable reconstruction that keeps the source's recognizable character |
+| **Keep original pages unchanged — الصفحات الأصلية دون تغيير** | documents that must remain visually unchanged | original PDF pages are placed directly into LaTeX with shapes, colors, headers, footers and images unchanged |
 
 Every visible option in the desktop app has a hover explanation. Technical controls live under **Advanced settings**.
 
@@ -33,7 +33,7 @@ Every visible option in the desktop app has a hover explanation. Technical contr
 
 - **Finished page size:** same physical shape as the source, A4, or US Letter.
 - **Use of pages:** compact continuous flow or one source page per output page. Both remain available for editable modes.
-- **Exact visual copy:** always one source page per output page because changing page boundaries cannot remain an exact copy. It may use the source page size, A4, or US Letter.
+- **Original pages unchanged:** always one source page per output page because changing page boundaries cannot preserve the page unchanged. It may use the source page size, A4, or US Letter.
 - **Natural photographs:** keep photographs of people, animals, places and objects, or replace them with objective written descriptions.
 - **Semantic visuals:** graphs, charts, tables, equations, flowcharts and technical diagrams are reconstructed as editable LaTeX only when their values and geometry can be recovered without guessing. If exact reconstruction is unsafe, the source visual is retained so it never disappears.
 
@@ -100,13 +100,17 @@ The app detects these tools at startup and uses them automatically:
 
 Arabic OCR data ships with the app; the Tesseract executable is still required. Arabic PDF compilation requires XeLaTeX, which is included with normal MiKTeX and TeX Live installations.
 
+The language selector defaults to automatic detection. When Arabic or Chinese OCR data is missing, the app downloads the official `tessdata_fast` language file into the user's application-data folder and reuses it. Users do not need to install Tesseract language packs manually.
+
+The desktop and browser interfaces include **Check for updates — التحقق من التحديثات**. It checks the public GitHub release feed and opens the official installer/download page only when a newer version exists.
+
 ## Local AI
 
 At startup, the app lists installed Ollama models and automatically chooses a suitable one:
 
 - `book-latex-qwen3-local-uncensored:8b` for clean editable conversion;
-- `book-latex-qwen35-vision:9b` for visual mathematics and close-layout conversion;
-- exact visual mode does not use AI.
+- `book-latex-qwen35-vision:9b` for visual mathematics and enhanced scans/lectures;
+- original-pages mode does not use AI.
 
 `UNCENSORED` is a visible user label. The provided conversion workflow identifies the source weights as the official `Qwen/Qwen3-8B` model; the label is not an independent claim about the weights.
 
