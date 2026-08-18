@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.0 — 2026-08-18
+
+- Renamed the main workflows to Reconstruct and polish, Enhance a scan or lecture, and Keep original pages unchanged, with Arabic translations.
+- Added a Check for updates button backed by the public GitHub release feed.
+- Added automatic Arabic/Chinese script detection and on-demand official Tesseract language-data installation.
+- Added Chinese Unicode XeLaTeX/CTeX compilation.
+- Added further automatic repairs for boxed floats, TikZ coordinates/colors/legends, split math, Unicode math symbols, and generated probability plots.
+- Repaired and compiled the reported 148-page `module01_close_layout` conversion.
+
 ## 1.2.0 — 2026-08-18
 
 - Separated visual fidelity, physical page size, and page usage into clear user choices.

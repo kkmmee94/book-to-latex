@@ -10,15 +10,16 @@ import subprocess
 import threading
 import tkinter as tk
 import traceback
+import webbrowser
 from collections.abc import Iterable
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from book_to_latex import (
+    APP_VERSION,
     DEFAULT_OLLAMA_ENDPOINT,
     DEFAULT_OPENAI_COMPAT_ENDPOINT,
-    DOCUMENT_LANGUAGES,
     IMAGE_EXTENSIONS,
     MATCH_MODE_PERCENT,
     PAGE_FLOW_COMPACT,
@@ -30,14 +31,15 @@ from book_to_latex import (
     PHOTO_KEEP,
     SUPPORTED_INPUT_EXTENSIONS,
     ConversionCancelled,
+    check_for_updates,
     convert_book_to_latex,
     ollama_connection_info,
     runtime_capabilities,
 )
 
-LOOK_CLEAN = "Clean and editable (recommended)"
-LOOK_CLOSE = "Stay close to the original layout"
-LOOK_EXACT = "Exact visual copy"
+LOOK_CLEAN = "Reconstruct and polish (fully editable) — إعادة بناء محسّنة"
+LOOK_CLOSE = "Enhance a scan or lecture — تحسين المسح أو المحاضرة"
+LOOK_EXACT = "Keep original pages unchanged — الصفحات الأصلية دون تغيير"
 
 COLOUR_KEEP = "Keep the original colours"
 COLOUR_MONO = "Black and white"
@@ -54,6 +56,13 @@ PAGE_FLOW_LABELS = {
 PHOTO_LABELS = {
     "Keep real photographs": PHOTO_KEEP,
     "Replace photographs with descriptions": PHOTO_DESCRIBE,
+}
+LANGUAGE_LABELS = {
+    "Detect automatically — اكتشاف تلقائي": "auto",
+    "English — الإنجليزية": "eng",
+    "Arabic — العربية": "ara",
+    "Chinese (Simplified) — الصينية المبسطة": "chi_sim",
+    "Chinese (Traditional) — الصينية التقليدية": "chi_tra",
 }
 
 AI_AUTO = "Automatic (recommended)"
@@ -154,7 +163,7 @@ class BookToLatexGUI:
         self.page_flow_var = tk.StringVar(value="Compact — use fewer pages")
         self.photo_var = tk.StringVar(value="Keep real photographs")
 
-        self.language_by_label = {label: code for code, label in DOCUMENT_LANGUAGES.items()}
+        self.language_by_label = LANGUAGE_LABELS.copy()
         default_language = "English" if "English" in self.language_by_label else next(
             iter(self.language_by_label)
         )
@@ -216,6 +225,16 @@ class BookToLatexGUI:
         ).pack(side="left", anchor="w", pady=(3, 0))
         ttk.Button(heading, text="How it works", command=self._show_help).pack(side="right", padx=(6, 0))
         ttk.Button(heading, text="Advanced settings", command=self._open_advanced).pack(side="right")
+        self.update_button = ttk.Button(
+            heading,
+            text=f"Check for updates (v{APP_VERSION})",
+            command=self._check_for_updates,
+        )
+        self.update_button.pack(side="right", padx=(0, 6))
+        add_tooltip(
+            self.update_button,
+            "Checks the public GitHub release page and offers the correct installer when a newer version exists. — يتحقق من وجود تحديث جديد على GitHub.",
+        )
 
         files = ttk.LabelFrame(main, text="1. Choose your file", style="Section.TLabelframe")
         files.pack(fill="x", pady=6)
@@ -248,15 +267,15 @@ class BookToLatexGUI:
         choices = [
             (
                 LOOK_CLEAN,
-                "Best for novels, poetry, essays and documents you want to edit. Uses clean readable formatting rather than copying every page position.",
+                "Rebuilds the entire document as polished editable LaTeX. Every word stays exact, while page design, tables and spacing are improved instead of copied.",
             ),
             (
                 LOOK_CLOSE,
-                "Best for mathematics, tables and structured pages. A vision model studies each page and recreates the layout as editable LaTeX.",
+                "Best for scanned lectures, notes and older documents. Makes them clearer and editable while keeping the character and structure of the source.",
             ),
             (
                 LOOK_EXACT,
-                "Looks identical because each original page is placed directly into LaTeX. The page text is not editable, and temporary page pictures are not kept.",
+                "Keeps every original page visually unchanged. Searchable text stays searchable when it existed in the source, but the LaTeX text is not reconstructed.",
             ),
         ]
         for row, (value, description) in enumerate(choices):
@@ -296,7 +315,7 @@ class BookToLatexGUI:
         language.grid(row=0, column=1, sticky="ew", padx=(0, 14), pady=7)
         add_tooltip(
             language,
-            "Choose the language already used in the document. Arabic enables right-to-left LaTeX, Arabic OCR, and XeLaTeX automatically. The app does not translate unless you ask it to.",
+            "Automatic detection is recommended. If Arabic or Chinese OCR data is missing, the app downloads the official Tesseract language file and remembers it. The source language is preserved, not translated. — يكتشف اللغة ويثبت دعم OCR المطلوب تلقائياً.",
         )
 
         ttk.Label(preferences, text="Colour").grid(
@@ -318,7 +337,7 @@ class BookToLatexGUI:
         self.colour_mono_button.grid(row=0, column=4, sticky="w", padx=(5, 12), pady=7)
         add_tooltip(
             [self.colour_keep_button, self.colour_mono_button],
-            "Close-layout mode reproduces visible colors in headings, boxes, charts and diagrams. Exact visual copy always keeps the source colors.",
+            "Enhanced mode reproduces visible colors in headings, boxes, charts and diagrams. Original-pages mode always keeps the source colors.",
         )
 
         ttk.Label(preferences, text="Finished page size").grid(
@@ -352,7 +371,7 @@ class BookToLatexGUI:
         )
         add_tooltip(
             self.page_flow_combo,
-            "Compact lets editable content flow naturally and use fewer pages. Keep every source page separate preserves each source page boundary. Exact visual copy always keeps one source page per output page.",
+            "Compact lets editable content flow naturally and use fewer pages. Keep every source page separate preserves each source page boundary. Original-pages mode always keeps one source page per output page.",
         )
 
         ttk.Label(preferences, text="Real photographs").grid(
@@ -437,9 +456,9 @@ class BookToLatexGUI:
 
     def _update_look_explanation(self) -> None:
         messages = {
-            LOOK_CLEAN: "Creates editable text with simple formatting. Choose Compact for fewer pages, or keep every source page separate.",
-            LOOK_CLOSE: "Vision AI reconstructs editable mathematics, tables, graphs, diagrams, colors, headers, footers and page structure. Natural photographs follow your Keep or Describe choice.",
-            LOOK_EXACT: "Places every original PDF page directly into LaTeX with its colors, shapes, headers, footers and photographs unchanged. Exact copy keeps one source page per output page; choose Same size, A4 or US Letter.",
+            LOOK_CLEAN: "Reconstructs every word into editable LaTeX and applies a clean professional design. Tables are redesigned and chosen graphs remain visible even when their appearance changes.",
+            LOOK_CLOSE: "Enhances scans or lecture notes while retaining their recognizable structure. Vision AI restores mathematics, tables, visuals, colors and meaningful page elements.",
+            LOOK_EXACT: "Keeps original pages visually unchanged. It always uses one source page per output page; choose Same size, A4 or US Letter.",
         }
         look = self.look_var.get()
         self.explanation_label.configure(text=messages[look])
@@ -511,11 +530,11 @@ class BookToLatexGUI:
         messagebox.showinfo(
             "How it works",
             "1. Choose the original file.\n\n"
-            "2. Choose Clean and editable, Stay close to the original, or Exact visual copy.\n\n"
+            "2. Choose Reconstruct and polish, Enhance a scan or lecture, or Keep original pages unchanged.\n\n"
             "3. Choose the page size and whether editable content should be compact or keep every source page separate.\n\n"
             "4. Choose whether real photographs should be kept or replaced with descriptions. Graphs, tables and technical diagrams are recreated as LaTeX automatically.\n\n"
             "5. Select Create LaTeX and PDF.\n\n"
-            "Exact visual copy is page-for-page and never compact. Editable modes can be compact. The app automatically handles models, OCR, compilation and checking.",
+            "Original-pages mode is page-for-page and never compact. Reconstructed and enhanced modes can be compact. The app automatically handles models, OCR, compilation and checking.",
         )
 
     def _open_advanced(self) -> None:
@@ -604,7 +623,7 @@ class BookToLatexGUI:
         self._advanced_field(ai_tab, 8, "Retry count", self.retries_var, "Extra attempts after a connection problem.")
         ttk.Label(
             ai_tab,
-            text="Automatic uses the text model for clean documents and the vision model for close-layout PDFs/images.",
+            text="Automatic uses the text model for reconstructed documents and the vision model for enhanced scans/lectures.",
             style="Hint.TLabel",
             wraplength=610,
         ).grid(row=9, column=0, columnspan=2, sticky="w", pady=12)
@@ -678,6 +697,38 @@ class BookToLatexGUI:
             self.events.put(("ollama_models", ollama_connection_info(timeout=4.0)))
 
         threading.Thread(target=load, daemon=True).start()
+
+    def _check_for_updates(self) -> None:
+        self.update_button.configure(state="disabled", text="Checking for updates…")
+
+        def check() -> None:
+            self.events.put(("update_check", check_for_updates(timeout=10)))
+
+        threading.Thread(target=check, daemon=True).start()
+
+    def _handle_update_check(self, info: dict[str, object]) -> None:
+        self.update_button.configure(
+            state="normal",
+            text=f"Check for updates (v{APP_VERSION})",
+        )
+        if not info.get("success"):
+            messagebox.showerror(
+                "Could not check for updates",
+                f"The GitHub release page could not be reached.\n\n{info.get('error') or 'Unknown connection error'}",
+            )
+            return
+        latest = str(info.get("latest_version") or "")
+        if not info.get("update_available"):
+            messagebox.showinfo(
+                "You are up to date",
+                f"Book to LaTeX v{APP_VERSION} is the newest public version.",
+            )
+            return
+        if messagebox.askyesno(
+            "Update available",
+            f"Book to LaTeX v{latest} is available.\n\nOpen the official download page now?",
+        ):
+            webbrowser.open(str(info.get("release_url")))
 
     def _handle_ollama_models(self, info: dict[str, object]) -> None:
         models = info.get("models") or []
@@ -777,7 +828,7 @@ class BookToLatexGUI:
             if not model:
                 messagebox.showerror(
                     "Vision model required",
-                    "Close-layout conversion needs the local vision model. Run setup_local_model.bat, then reopen the app.",
+                    "Enhancing a scan or lecture needs the local vision model. Run setup_local_model.bat, then reopen the app.",
                 )
                 return None
             return "ollama", model, DEFAULT_OLLAMA_ENDPOINT, False, True
@@ -808,7 +859,7 @@ class BookToLatexGUI:
         if look == LOOK_EXACT and not visual_input:
             messagebox.showerror(
                 "Visual source required",
-                "Exact visual copy is available for PDFs and images. Choose another appearance for this file.",
+                "Keeping original pages unchanged is available for PDFs and images. Choose another result type for this file.",
             )
             return
         numbers = self._read_numbers()
@@ -1010,6 +1061,8 @@ class BookToLatexGUI:
                     self.status_label.configure(text=message)
                 elif kind == "ollama_models":
                     self._handle_ollama_models(value)
+                elif kind == "update_check":
+                    self._handle_update_check(value)
                 elif kind == "result":
                     self._handle_result(value)
                 elif kind == "cancelled":

@@ -80,10 +80,15 @@ PHOTO_DESCRIBE = "describe"
 
 DEFAULT_OPENAI_COMPAT_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 DEFAULT_OLLAMA_ENDPOINT = "http://127.0.0.1:11434/api/chat"
+APP_VERSION = "1.3.0"
+GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/kkmmee94/book-to-latex/releases/latest"
 
 DOCUMENT_LANGUAGES = {
+    "auto": "Detect automatically",
     "eng": "English",
     "ara": "Arabic",
+    "chi_sim": "Chinese (Simplified)",
+    "chi_tra": "Chinese (Traditional)",
 }
 
 IMAGE_EXTENSIONS = {
@@ -190,11 +195,84 @@ def _bundled_tessdata_dir() -> Path | None:
     return next((directory for directory in candidates if directory.is_dir()), None)
 
 
+def _user_tessdata_dir() -> Path:
+    if os.name == "nt":
+        root = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
+        return root / "BookToLatex" / "tessdata"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "BookToLatex" / "tessdata"
+    root = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+    return root / "book-to-latex" / "tessdata"
+
+
+def ensure_ocr_language(
+    language: str,
+    log_callback: LogCallback | None = None,
+) -> list[str]:
+    """Download missing official Tesseract language data on demand."""
+    codes = [code for code in (language or "eng").split("+") if code]
+    allowed = set(DOCUMENT_LANGUAGES) - {"auto"}
+    invalid = [code for code in codes if code not in allowed]
+    if invalid:
+        raise ValueError(f"Unsupported OCR language code: {', '.join(invalid)}")
+
+    installed: set[str] = set()
+    tesseract_path = _find_tesseract()
+    if pytesseract is not None and tesseract_path:
+        try:
+            pytesseract.pytesseract.tesseract_cmd = tesseract_path
+            installed = set(pytesseract.get_languages(config=""))
+        except Exception:  # noqa: BLE001
+            installed = set()
+    bundled = _bundled_tessdata_dir()
+    user_dir = _user_tessdata_dir()
+    ready: list[str] = []
+    for code in codes:
+        if code in installed or (bundled and (bundled / f"{code}.traineddata").is_file()):
+            ready.append(code)
+            continue
+        destination = user_dir / f"{code}.traineddata"
+        if destination.is_file() and destination.stat().st_size > 100_000:
+            ready.append(code)
+            continue
+        user_dir.mkdir(parents=True, exist_ok=True)
+        url = f"https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/{code}.traineddata"
+        temporary = destination.with_suffix(".traineddata.download")
+        _log(log_callback, f"Installing OCR language data: {DOCUMENT_LANGUAGES.get(code, code)}")
+        try:
+            request = urllib.request.Request(
+                url,
+                headers={"User-Agent": f"book-to-latex/{APP_VERSION}"},
+            )
+            with urllib.request.urlopen(request, timeout=120) as response:
+                data = response.read(100 * 1024 * 1024 + 1)
+            if not 100_000 < len(data) <= 100 * 1024 * 1024:
+                raise RuntimeError("Downloaded OCR language file has an unexpected size")
+            temporary.write_bytes(data)
+            temporary.replace(destination)
+        except Exception as exc:  # noqa: BLE001
+            if temporary.is_file():
+                temporary.unlink()
+            raise RuntimeError(
+                f"Could not install {DOCUMENT_LANGUAGES.get(code, code)} OCR data: {exc}"
+            ) from exc
+        ready.append(code)
+    return ready
+
+
 def _tesseract_config(language: str) -> str:
     """Use bundled OCR data when the selected language is supplied by the app."""
-    directory = _bundled_tessdata_dir()
     language_code = (language or "eng").split("+")[0]
-    if directory and (directory / f"{language_code}.traineddata").is_file():
+    directories = [_user_tessdata_dir(), _bundled_tessdata_dir()]
+    directory = next(
+        (
+            candidate
+            for candidate in directories
+            if candidate and (candidate / f"{language_code}.traineddata").is_file()
+        ),
+        None,
+    )
+    if directory:
         directory_text = str(directory)
         if os.name == "nt":
             # pytesseract uses non-POSIX shlex on Windows, which preserves quote
@@ -1055,6 +1133,53 @@ def _ollama_base_url(endpoint: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def _version_tuple(version: str) -> tuple[int, ...]:
+    numbers = re.findall(r"\d+", version.split("-", 1)[0])
+    return tuple(int(number) for number in numbers[:4]) or (0,)
+
+
+def check_for_updates(timeout: float = 8.0) -> dict[str, object]:
+    """Check the public GitHub release feed without changing the installation."""
+    request = urllib.request.Request(
+        GITHUB_LATEST_RELEASE_API,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"book-to-latex/{APP_VERSION}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        latest = str(payload.get("tag_name") or "").lstrip("v")
+        assets = [
+            {
+                "name": str(asset.get("name") or ""),
+                "url": str(asset.get("browser_download_url") or ""),
+            }
+            for asset in payload.get("assets", [])
+            if isinstance(asset, dict)
+        ]
+        return {
+            "success": bool(latest),
+            "current_version": APP_VERSION,
+            "latest_version": latest,
+            "update_available": bool(latest) and _version_tuple(latest) > _version_tuple(APP_VERSION),
+            "release_url": str(payload.get("html_url") or "https://github.com/kkmmee94/book-to-latex/releases/latest"),
+            "assets": assets,
+            "error": None,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "success": False,
+            "current_version": APP_VERSION,
+            "latest_version": "",
+            "update_available": False,
+            "release_url": "https://github.com/kkmmee94/book-to-latex/releases/latest",
+            "assets": [],
+            "error": str(exc),
+        }
+
+
 def ollama_connection_info(
     endpoint: str = DEFAULT_OLLAMA_ENDPOINT,
     timeout: float = 3.0,
@@ -1114,6 +1239,12 @@ def runtime_capabilities() -> dict[str, object]:
             set(ocr_languages)
             | {path.stem for path in bundled_tessdata.glob("*.traineddata")}
         )
+    user_tessdata = _user_tessdata_dir()
+    if user_tessdata.is_dir():
+        ocr_languages = sorted(
+            set(ocr_languages)
+            | {path.stem for path in user_tessdata.glob("*.traineddata")}
+        )
     return {
         "pdf_compiler": shutil.which("pdflatex"),
         "unicode_pdf_compiler": shutil.which("xelatex"),
@@ -1163,6 +1294,34 @@ def _render_pdf_page_image(
     output_path = output_dir / f"page_{page_no + 1:03d}.png"
     pix.save(str(output_path))
     return output_path
+
+
+def _detect_language_from_text(text: str) -> str | None:
+    sample = text[:100_000]
+    counts = {
+        "ara": sum("\u0600" <= char <= "\u06ff" for char in sample),
+        "chi_sim": sum("\u4e00" <= char <= "\u9fff" for char in sample),
+    }
+    language, count = max(counts.items(), key=lambda item: item[1])
+    return language if count >= 4 else None
+
+
+def _detect_language_from_image(image: object) -> str | None:
+    _ensure_ocr_dependencies()
+    try:
+        osd = pytesseract.image_to_osd(image)
+    except Exception:  # noqa: BLE001
+        return None
+    match = re.search(r"Script:\s*([^\r\n]+)", osd, flags=re.I)
+    script = match.group(1).strip().lower() if match else ""
+    script_map = {
+        "arabic": "ara",
+        "han": "chi_sim",
+        "han simplified": "chi_sim",
+        "han traditional": "chi_tra",
+        "latin": "eng",
+    }
+    return script_map.get(script)
 
 
 def _extract_pdf_page_assets(
@@ -1261,6 +1420,7 @@ def _ocr_pdf_page(
     color: bool,
 ) -> str:
     _ensure_ocr_dependencies()
+    ensure_ocr_language(lang or "eng")
     page = pdf_doc.load_page(page_no)
     matrix = fitz.Matrix(dpi / 72, dpi / 72)
     pix = page.get_pixmap(matrix=matrix, alpha=False)
@@ -1295,6 +1455,7 @@ def _load_image_frame(file_path: Path, frame_number: int) -> object:
 
 def _ocr_image_frame(file_path: Path, frame_number: int, lang: str) -> str:
     _ensure_ocr_dependencies()
+    ensure_ocr_language(lang or "eng")
     frame = _load_image_frame(file_path, frame_number)
     return pytesseract.image_to_string(
         frame,
@@ -1692,6 +1853,10 @@ def _build_header(
         lines.append("\\setotherlanguage{english}")
         lines.append("\\setmainfont{Amiri}")
         lines.append("\\newfontfamily\\arabicfont[Script=Arabic]{Amiri}")
+    elif document_language in {"chi_sim", "chi_tra"}:
+        lines.append("\\usepackage{fontspec}")
+        lines.append("\\usepackage[UTF8,scheme=plain,fontset=none]{ctex}")
+        lines.append("\\setCJKmainfont{FandolSong-Regular}")
     else:
         lines.append("\\usepackage[utf8]{inputenc}")
         lines.append("\\usepackage[T1]{fontenc}")
@@ -2016,6 +2181,8 @@ def _page_to_latex(
                 "approximate visual",
                 "approximation of",
                 "schematic only",
+                "...",
+                r"\dots",
             )
             semantic_violation = bool(semantic_references) and (
                 any(reference in llm_raw for reference in semantic_references)
@@ -2047,6 +2214,20 @@ def _page_to_latex(
                 warnings.append(
                     "AI could not recreate one or more semantic visuals; the source visual was retained so it remains visible"
                 )
+                figure_pattern = re.compile(
+                    r"\\begin\{figure\}(?:\[[^\]]*\])?.*?\\end\{figure\}",
+                    re.DOTALL,
+                )
+
+                def remove_ungrounded_figure(match: re.Match[str]) -> str:
+                    figure_text = match.group(0)
+                    if any(marker in figure_text for marker in semantic_markers):
+                        return ""
+                    if any(reference in figure_text for reference in semantic_references):
+                        return ""
+                    return figure_text
+
+                llm = figure_pattern.sub(remove_ungrounded_figure, llm)
                 for item in inventory:
                     if item["reference"] not in semantic_references:
                         continue
@@ -2495,11 +2676,17 @@ def _ensure_latex_packages(
     }
     if "\\usepackage{fontspec}" in source:
         required["fontspec.sty"] = "fontspec"
+    if "\\usepackage{polyglossia}" in source:
         required["polyglossia.sty"] = "polyglossia"
         required["bidi.sty"] = "bidi"
         required["Amiri-Regular.ttf"] = "amiri"
-    else:
+    if "\\usepackage{fontspec}" not in source:
         required["lmodern.sty"] = "lm"
+    if "{ctex}" in source:
+        required["ctex.sty"] = "ctex"
+        required["xeCJK.sty"] = "xecjk"
+        required["zhnumber.sty"] = "zhnumber"
+        required["FandolSong-Regular.otf"] = "fandol"
     if "\\usepackage{graphicx}" in source:
         required["graphicx.sty"] = "graphics"
         required["float.sty"] = "float"
@@ -2669,6 +2856,11 @@ def _ensure_generated_preamble(output_path: Path) -> list[str]:
         (r"\begin{multicols}", r"\usepackage{multicol}", "multiple columns"),
         (r"\begin{landscape}", r"\usepackage{pdflscape}", "landscape pages"),
         (r"\SI{", r"\usepackage{siunitx}", "scientific units"),
+        (
+            "phi(",
+            r"\pgfmathdeclarefunction{phi}{1}{\pgfmathparse{exp(-#1*#1/2)/sqrt(2*pi)}}",
+            "the standard normal density function",
+        ),
     ]
     packages: list[str] = []
     repairs: list[str] = []
@@ -2690,9 +2882,41 @@ def _repair_tikz_compatibility(output_path: Path) -> list[str]:
     """Normalize two common vision-model TikZ mistakes."""
     source = output_path.read_text(encoding="utf-8", errors="replace")
     repaired = source.replace(">=stealth'", ">=stealth")
+    paired_range = "{0/0, 1/1, ..., 8/8}"
+    expanded_paired_range = "{" + ", ".join(f"{value}/{value}" for value in range(9)) + "}"
+    paired_range_count = repaired.count(paired_range)
+    repaired = repaired.replace(paired_range, expanded_paired_range)
+    normal_cdf_pattern = r"0\.5\*\(1\+erf\(\\x/sqrt\(2\)\)\)"
+    repaired, normal_cdf_count = re.subn(
+        normal_cdf_pattern,
+        r"1/(1+exp(-1.702*\\x))",
+        repaired,
+    )
+    repaired, color_name_count = re.subn(r"\bmaroon(?=!)", "Maroon", repaired)
+    repaired, lavender_count = re.subn(
+        r"\blavender(?=[!,}\]])",
+        "Lavender",
+        repaired,
+    )
+    color_name_count += lavender_count
+    repaired, undefined_tick_count = re.subn(r"\(\\tickx\s*,", "(0,", repaired)
     repaired, tick_key_count = re.subn(
         r",\s*[xy]tick\s+distance\s*=\s*[-+]?\d*\.?\d+",
         "",
+        repaired,
+    )
+    repaired, undefined_series_count = re.subn(
+        r"\\foreach\s+\\country/\\color\s+in\s+\{[^{}]*\}\s*"
+        r"\{[^{}]*\(\\x,\\y\)[^{}]*\}",
+        "% Removed an invalid TikZ series with undefined coordinates",
+        repaired,
+        flags=re.DOTALL,
+    )
+    repaired, node_label_count = re.subn(
+        r"(?m)^(\s*\\node\b[^{}]*\{)"
+        r"(\\textcolor\{[^{}]+\}\{\\rule\{[^{}]+\}\{[^{}]+\}\})"
+        r"\}\s*([^;\r\n]+);$",
+        r"\1\2 \3};",
         repaired,
     )
     repaired, comment_count = re.subn(r"(?m)^(\s*)\\%(?=\s*[A-Za-z])", r"\1%", repaired)
@@ -2703,9 +2927,85 @@ def _repair_tikz_compatibility(output_path: Path) -> list[str]:
         repairs.append(f"Repaired {comment_count} TikZ/comment line(s)")
     if tick_key_count:
         repairs.append(f"Removed {tick_key_count} pgfplots-only option(s) from TikZ pictures")
+    if undefined_tick_count:
+        repairs.append(f"Repaired {undefined_tick_count} undefined TikZ tick position(s)")
+    if color_name_count:
+        repairs.append(f"Normalized {color_name_count} TikZ/xcolor name(s)")
+    if undefined_series_count:
+        repairs.append(f"Removed {undefined_series_count} TikZ series with undefined coordinates")
+    if node_label_count:
+        repairs.append(f"Repaired {node_label_count} malformed TikZ legend label(s)")
+    if paired_range_count:
+        repairs.append(f"Expanded {paired_range_count} invalid paired TikZ range(s)")
+    if normal_cdf_count:
+        repairs.append(f"Replaced {normal_cdf_count} unsupported PGF normal-CDF expression(s)")
     if repairs:
         output_path.write_text(repaired, encoding="utf-8")
     return repairs
+
+
+def _repair_inner_floats(output_path: Path) -> list[str]:
+    """Make figures/tables non-floating when page content is boxed to one page."""
+    source = output_path.read_text(encoding="utf-8", errors="replace")
+    if r"\begin{adjustbox}" not in source:
+        return []
+    repaired, count = re.subn(
+        r"\\begin\{(figure|table)\}(?:\[[^\]]*\])?",
+        r"\\begin{\1}[H]",
+        source,
+    )
+    if count and repaired != source:
+        output_path.write_text(repaired, encoding="utf-8")
+        return [f"Changed {count} boxed figure/table(s) to non-floating placement"]
+    return []
+
+
+def _repair_text_mode_bullets(output_path: Path) -> list[str]:
+    """Wrap bullet symbols in math mode inside custom item labels."""
+    source = output_path.read_text(encoding="utf-8", errors="replace")
+    normalized, duplicate_count = re.subn(r"\$+\\bullet\$+", r"$\\bullet$", source)
+    pattern = re.compile(r"(\\item\[[^\]]*?)(?<!\$)\\bullet(?!\$)([^\]]*\])")
+    repaired, bare_count = pattern.subn(r"\1$\\bullet$\2", normalized)
+    count = duplicate_count + bare_count
+    if count and repaired != source:
+        output_path.write_text(repaired, encoding="utf-8")
+        return [f"Repaired {count} custom bullet label(s)"]
+    return []
+
+
+def _repair_split_math_fragments(output_path: Path) -> list[str]:
+    """Join equality signs and following fraction commands into one math span."""
+    source = output_path.read_text(encoding="utf-8", errors="replace")
+    repaired, count = re.subn(
+        r"(?m)\$\s*=\s*\$\s*(\\frac[^\r\n]+)$",
+        r"$= \1$",
+        source,
+    )
+    if count and repaired != source:
+        output_path.write_text(repaired, encoding="utf-8")
+        return [f"Repaired {count} split mathematical fraction(s)"]
+    return []
+
+
+def _repair_unicode_fragments(output_path: Path) -> list[str]:
+    """Replace common Unicode math characters left in AI-generated LaTeX."""
+    source = output_path.read_text(encoding="utf-8", errors="replace")
+    replacements = {
+        "∼": r"$\sim$",
+        "−": "-",
+        "≤": r"$\leq$",
+        "≥": r"$\geq$",
+    }
+    repaired = source
+    count = 0
+    for character, latex in replacements.items():
+        occurrences = repaired.count(character)
+        repaired = repaired.replace(character, latex)
+        count += occurrences
+    if count and repaired != source:
+        output_path.write_text(repaired, encoding="utf-8")
+        return [f"Converted {count} Unicode mathematical symbol(s) to LaTeX"]
+    return []
 
 
 def _compile_latex(output_path: Path, log_callback: LogCallback | None) -> dict[str, object]:
@@ -2727,7 +3027,20 @@ def _compile_latex(output_path: Path, log_callback: LogCallback | None) -> dict[
     structural_repairs = _repair_tabular_columns(output_path)
     preamble_repairs = _ensure_generated_preamble(output_path)
     tikz_repairs = _repair_tikz_compatibility(output_path)
-    repairs = [*missing_graphics, *structural_repairs, *preamble_repairs, *tikz_repairs]
+    float_repairs = _repair_inner_floats(output_path)
+    bullet_repairs = _repair_text_mode_bullets(output_path)
+    math_repairs = _repair_split_math_fragments(output_path)
+    unicode_repairs = _repair_unicode_fragments(output_path)
+    repairs = [
+        *missing_graphics,
+        *structural_repairs,
+        *preamble_repairs,
+        *tikz_repairs,
+        *float_repairs,
+        *bullet_repairs,
+        *math_repairs,
+        *unicode_repairs,
+    ]
     for reference in missing_graphics:
         _log(log_callback, f"Removed unavailable image reference before PDF creation: {reference}")
     for repair in structural_repairs:
@@ -2735,6 +3048,14 @@ def _compile_latex(output_path: Path, log_callback: LogCallback | None) -> dict[
     for repair in preamble_repairs:
         _log(log_callback, repair)
     for repair in tikz_repairs:
+        _log(log_callback, repair)
+    for repair in float_repairs:
+        _log(log_callback, repair)
+    for repair in bullet_repairs:
+        _log(log_callback, repair)
+    for repair in math_repairs:
+        _log(log_callback, repair)
+    for repair in unicode_repairs:
         _log(log_callback, repair)
 
     package_error = _ensure_latex_packages(output_path, log_callback)
@@ -3049,6 +3370,42 @@ def convert_book_to_latex(
     if start_page > end_page:
         raise ValueError(f"Start page cannot be after page {end_page}")
     selected_indices = list(range(start_page - 1, end_page))
+
+    if document_language == "auto" or ocr_lang == "auto":
+        detected_language = _detect_language_from_text(
+            "\n".join(pages[index] for index in selected_indices[:12])
+        )
+        if not detected_language and source_is_visual and not exact_visual_mode:
+            try:
+                if source_is_pdf:
+                    _ensure_fitz()
+                    detection_doc = fitz.open(input_path)  # type: ignore[union-attr]
+                    try:
+                        detection_page = detection_doc.load_page(selected_indices[0])
+                        detection_pix = detection_page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+                        assert _PILImage is not None
+                        detection_image = _PILImage.frombytes(
+                            "RGB",
+                            (detection_pix.width, detection_pix.height),
+                            detection_pix.samples,
+                        )
+                    finally:
+                        detection_doc.close()
+                else:
+                    detection_image = _load_image_frame(input_path, selected_indices[0])
+                detected_language = _detect_language_from_image(detection_image)
+            except Exception:  # noqa: BLE001
+                detected_language = None
+        detected_language = detected_language or "eng"
+        document_language = detected_language
+        ocr_lang = detected_language
+        _log(
+            log_callback,
+            f"Detected document language: {DOCUMENT_LANGUAGES.get(detected_language, detected_language)}",
+        )
+
+    if (use_ocr or source_is_image) and not exact_visual_mode:
+        ensure_ocr_language(ocr_lang, log_callback)
 
     extract_visual_assets = vision_mode and not exact_visual_mode
     assets_dir_name = f"{_safe_file_component(output_path.stem)}_assets"

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 project_root="$(cd "$(dirname "$0")/../.." && pwd)"
-version="${1:-1.2.0}"
+version="${1:-1.3.0}"
 stage="$project_root/build/linux-deb/book-to-latex"
 
 cd "$project_root"
