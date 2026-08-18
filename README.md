@@ -27,7 +27,7 @@ Temporary page renders are deleted automatically. Required visual assets remain 
 | **Enhance a scan or lecture** | scanned lectures, notes, mathematics and older documents | clearer editable reconstruction that keeps the source's recognizable character |
 | **Keep original pages unchanged** | documents that must remain visually unchanged | original PDF pages are placed directly into LaTeX with shapes, colors, headers, footers and images unchanged |
 
-Every visible option in the desktop app has a hover explanation. Technical controls live under **Advanced settings**.
+Every visible option in the desktop app has a hover explanation. AI setup has its own plain-language button; the remaining technical controls live under **More settings**.
 
 ## Page and visual decisions are independent
 
@@ -102,11 +102,11 @@ Arabic OCR data ships with the app; the Tesseract executable is still required. 
 
 The language selector defaults to automatic detection. When Arabic or Chinese OCR data is missing, the app downloads the official `tessdata_fast` language file into the user's application-data folder and reuses it. Users do not need to install Tesseract language packs manually.
 
-The desktop and browser interfaces include **Check for updates**. It checks the public GitHub release feed and opens the official installer/download page only when a newer version exists.
+The desktop and browser interfaces include **Check for updates**. Packaged builds ship a current certificate-authority bundle for reliable GitHub HTTPS access. If an automatic check still cannot connect, the desktop app offers to open the official release page directly in the browser.
 
 ## Local AI
 
-At startup, the app lists installed Ollama models and automatically chooses a suitable one:
+At startup, the app discovers ready models from Ollama, LM Studio, Jan, GPT4All and llama.cpp and scans common Ollama, LM Studio, Hugging Face, GGUF, Safetensors and MLX model locations. It automatically chooses a suitable ready model:
 
 - `book-latex-qwen3-local-uncensored:8b` for clean editable conversion;
 - `book-latex-qwen35-vision:9b` for visual mathematics and enhanced scans/lectures;
@@ -114,7 +114,9 @@ At startup, the app lists installed Ollama models and automatically chooses a su
 
 `UNCENSORED` is a visible user label. The provided conversion workflow identifies the source weights as the official `Qwen/Qwen3-8B` model; the label is not an independent claim about the weights.
 
-Set up the standard models:
+In the desktop app, select **Choose or set up AI → Install recommended local AI**. This cross-platform guided option installs Qwen 3.5 9B through Ollama and requires no Terminal command.
+
+Windows source-checkout users can set up the standard custom models with:
 
 ```powershell
 .\setup_local_model.ps1
@@ -127,6 +129,8 @@ Import an existing Hugging Face Qwen3 folder exactly:
 ```
 
 The second script converts the safetensors to GGUF, quantizes to Q4_K_M, creates the visible Ollama model, tests it, and removes the temporary F16 file.
+
+For OpenAI, select **OpenAI — online**, paste one API key, and choose Balanced, Best quality, or Lower cost. The app owns the model IDs and connection address; users never need to type either one.
 
 ## CLI examples
 

@@ -33,7 +33,10 @@ from book_to_latex import (
     ConversionCancelled,
     check_for_updates,
     convert_book_to_latex,
-    ollama_connection_info,
+    discover_local_ai,
+    install_recommended_local_model,
+    model_supports_vision,
+    openai_connection_info,
     runtime_capabilities,
 )
 
@@ -66,9 +69,15 @@ LANGUAGE_LABELS = {
 }
 
 AI_AUTO = "Automatic (recommended)"
-AI_OLLAMA = "Choose an installed Ollama model"
-AI_OPENAI = "Use an OpenAI-compatible service"
-AI_NONE = "Do not use AI"
+AI_OLLAMA = "Local AI — private on this computer"
+AI_OPENAI = "OpenAI — online"
+AI_NONE = "Basic conversion without AI"
+
+OPENAI_MODEL_LABELS = {
+    "Balanced quality and cost — GPT-5.6 Terra (recommended)": "gpt-5.6-terra",
+    "Best quality — GPT-5.6 Sol": "gpt-5.6-sol",
+    "Lower cost — GPT-5.6 Luna": "gpt-5.6-luna",
+}
 
 class ToolTip:
     def __init__(self, widget: tk.Widget, text: str, delay_ms: int = 450) -> None:
@@ -153,7 +162,8 @@ class BookToLatexGUI:
         self.details_text: tk.Text | None = None
         self.log_messages: list[str] = []
         self.capabilities = runtime_capabilities()
-        self.local_model_names: list[str] = []
+        self.local_models: list[dict[str, object]] = []
+        self.local_model_by_label: dict[str, dict[str, object]] = {}
 
         self.input_var = tk.StringVar()
         self.output_var = tk.StringVar()
@@ -171,9 +181,11 @@ class BookToLatexGUI:
 
         # Expert settings are intentionally hidden from the main workflow.
         self.ai_choice_var = tk.StringVar(value=AI_AUTO)
-        self.advanced_model_var = tk.StringVar()
-        self.endpoint_var = tk.StringVar(value=DEFAULT_OLLAMA_ENDPOINT)
-        self.api_key_var = tk.StringVar()
+        self.local_model_var = tk.StringVar()
+        self.openai_model_by_label = OPENAI_MODEL_LABELS.copy()
+        self.openai_model_var = tk.StringVar(value=next(iter(self.openai_model_by_label)))
+        self.api_key_var = tk.StringVar(value=os.environ.get("OPENAI_API_KEY", ""))
+        self.ai_connection_status_var = tk.StringVar(value="Choose Automatic unless you want a specific service.")
         self.start_page_var = tk.StringVar(value="1")
         self.end_page_var = tk.StringVar(value="0")
         self.lines_per_unit_var = tk.StringVar(value="70")
@@ -224,7 +236,7 @@ class BookToLatexGUI:
             style="Subtitle.TLabel",
         ).pack(side="left", anchor="w", pady=(3, 0))
         ttk.Button(heading, text="How it works", command=self._show_help).pack(side="right", padx=(6, 0))
-        ttk.Button(heading, text="Advanced settings", command=self._open_advanced).pack(side="right")
+        ttk.Button(heading, text="More settings", command=self._open_advanced).pack(side="right")
         self.update_button = ttk.Button(
             heading,
             text=f"Check for updates (v{APP_VERSION})",
@@ -412,6 +424,11 @@ class BookToLatexGUI:
             style="Hint.TLabel",
         )
         self.readiness_label.pack(anchor="w", padx=12)
+        ttk.Button(
+            main,
+            text="Choose or set up AI…",
+            command=lambda: self._open_advanced("ai"),
+        ).pack(anchor="w", padx=12, pady=(4, 2))
 
         ttk.Label(
             main,
@@ -537,9 +554,9 @@ class BookToLatexGUI:
             "Original-pages mode is page-for-page and never compact. Reconstructed and enhanced modes can be compact. The app automatically handles models, OCR, compilation and checking.",
         )
 
-    def _open_advanced(self) -> None:
+    def _open_advanced(self, initial_tab: str = "") -> None:
         dialog = tk.Toplevel(self.root)
-        dialog.title("Advanced settings")
+        dialog.title("More settings")
         dialog.geometry("680x560")
         dialog.transient(self.root)
         notebook = ttk.Notebook(dialog)
@@ -596,7 +613,7 @@ class BookToLatexGUI:
         )
 
         ai_tab.columnconfigure(1, weight=1)
-        ttk.Label(ai_tab, text="AI choice").grid(row=0, column=0, sticky="w", pady=7)
+        ttk.Label(ai_tab, text="AI service").grid(row=0, column=0, sticky="w", pady=7)
         ai_choice = ttk.Combobox(
             ai_tab,
             textvariable=self.ai_choice_var,
@@ -605,28 +622,79 @@ class BookToLatexGUI:
         )
         ai_choice.grid(row=0, column=1, sticky="ew", pady=7)
         ai_choice.bind("<<ComboboxSelected>>", lambda _event: self._update_advanced_ai_state())
-        ttk.Label(ai_tab, text="Model").grid(row=1, column=0, sticky="w", pady=7)
-        self.advanced_model_combo = ttk.Combobox(
+        add_tooltip(
+            ai_choice,
+            "Automatic uses a ready local model first. Choose OpenAI when you prefer online AI, or Basic conversion when you do not want AI.",
+        )
+
+        ttk.Label(ai_tab, text="Local model").grid(row=1, column=0, sticky="w", pady=7)
+        self.local_model_combo = ttk.Combobox(
             ai_tab,
-            textvariable=self.advanced_model_var,
-            values=self.local_model_names,
+            textvariable=self.local_model_var,
+            values=list(self.local_model_by_label),
+            state="readonly",
         )
-        self.advanced_model_combo.grid(row=1, column=1, sticky="ew", pady=7)
-        ttk.Button(ai_tab, text="Refresh installed models", command=self._refresh_local_models).grid(
-            row=2, column=1, sticky="w", pady=(0, 10)
+        self.local_model_combo.grid(row=1, column=1, sticky="ew", pady=7)
+        local_actions = ttk.Frame(ai_tab)
+        local_actions.grid(row=2, column=1, sticky="w", pady=(0, 10))
+        ttk.Button(local_actions, text="Search this computer again", command=self._refresh_local_models).pack(
+            side="left"
         )
-        self._advanced_field(ai_tab, 3, "Connection address", self.endpoint_var, "Automatic uses Ollama's local address.")
-        self._advanced_field(ai_tab, 4, "API key", self.api_key_var, "Only needed by online services.", secret=True)
-        self._advanced_field(ai_tab, 5, "Maximum AI output", self.max_tokens_var, "4096 suits dense pages.")
-        self._advanced_field(ai_tab, 6, "AI creativity", self.temperature_var, "0 preserves source fidelity.")
-        self._advanced_field(ai_tab, 7, "Timeout (seconds)", self.timeout_var, "Maximum wait per page.")
-        self._advanced_field(ai_tab, 8, "Retry count", self.retries_var, "Extra attempts after a connection problem.")
+        ttk.Button(
+            local_actions,
+            text="Install recommended local AI…",
+            command=self._install_local_ai,
+        ).pack(side="left", padx=(8, 0))
+
+        ttk.Label(ai_tab, text="OpenAI model").grid(row=3, column=0, sticky="w", pady=7)
+        self.openai_model_combo = ttk.Combobox(
+            ai_tab,
+            textvariable=self.openai_model_var,
+            values=list(self.openai_model_by_label),
+            state="readonly",
+        )
+        self.openai_model_combo.grid(row=3, column=1, sticky="ew", pady=7)
+        add_tooltip(
+            self.openai_model_combo,
+            "The recommended balanced model is already selected. Every listed model can read text and page images.",
+        )
+
+        ttk.Label(ai_tab, text="OpenAI API key").grid(row=4, column=0, sticky="w", pady=7)
+        self.api_key_entry = ttk.Entry(ai_tab, textvariable=self.api_key_var, show="•")
+        self.api_key_entry.grid(row=4, column=1, sticky="ew", pady=7)
+        add_tooltip(
+            self.api_key_entry,
+            "Paste the private key from your OpenAI API account. The app uses it only for your conversion requests.",
+        )
+        online_actions = ttk.Frame(ai_tab)
+        online_actions.grid(row=5, column=1, sticky="w", pady=(0, 8))
+        ttk.Button(
+            online_actions,
+            text="Get an OpenAI API key",
+            command=lambda: webbrowser.open("https://platform.openai.com/api-keys"),
+        ).pack(side="left")
+        ttk.Button(
+            online_actions,
+            text="Test connection and choose model",
+            command=self._test_openai_connection,
+        ).pack(side="left", padx=(8, 0))
         ttk.Label(
             ai_tab,
-            text="Automatic uses the text model for reconstructed documents and the vision model for enhanced scans/lectures.",
+            textvariable=self.ai_connection_status_var,
+            style="Hint.TLabel",
+            wraplength=500,
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(2, 10))
+
+        self._advanced_field(ai_tab, 7, "Maximum AI output", self.max_tokens_var, "4096 suits dense pages.")
+        self._advanced_field(ai_tab, 8, "AI creativity", self.temperature_var, "0 preserves source fidelity.")
+        self._advanced_field(ai_tab, 9, "Timeout (seconds)", self.timeout_var, "Maximum wait per page.")
+        self._advanced_field(ai_tab, 10, "Retry count", self.retries_var, "Extra attempts after a connection problem.")
+        ttk.Label(
+            ai_tab,
+            text="You never need to type a model name or connection address. Automatic uses a detected local model; OpenAI uses the choice above.",
             style="Hint.TLabel",
             wraplength=610,
-        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=12)
+        ).grid(row=11, column=0, columnspan=2, sticky="w", pady=12)
 
         style_tab.columnconfigure(1, weight=1)
         ttk.Label(style_tab, text="Project style guide").grid(row=0, column=0, sticky="w", pady=8)
@@ -650,6 +718,8 @@ class BookToLatexGUI:
 
         ttk.Button(dialog, text="Done", command=dialog.destroy).pack(pady=(0, 12))
         self._update_advanced_ai_state()
+        if initial_tab == "ai":
+            notebook.select(ai_tab)
 
     def _advanced_field(
         self,
@@ -669,18 +739,21 @@ class BookToLatexGUI:
         add_tooltip([label, entry], help_text)
 
     def _update_advanced_ai_state(self) -> None:
-        if not hasattr(self, "advanced_model_combo"):
+        if not hasattr(self, "local_model_combo") or not self.local_model_combo.winfo_exists():
             return
         choice = self.ai_choice_var.get()
         if choice == AI_OLLAMA:
-            self.advanced_model_combo.configure(state="readonly" if self.local_model_names else "normal")
-            self.endpoint_var.set(DEFAULT_OLLAMA_ENDPOINT)
+            self.local_model_combo.configure(state="readonly" if self.local_model_by_label else "disabled")
+            self.openai_model_combo.configure(state="disabled")
+            self.api_key_entry.configure(state="disabled")
         elif choice == AI_OPENAI:
-            self.advanced_model_combo.configure(state="normal")
-            if self.endpoint_var.get() == DEFAULT_OLLAMA_ENDPOINT:
-                self.endpoint_var.set(DEFAULT_OPENAI_COMPAT_ENDPOINT)
+            self.local_model_combo.configure(state="disabled")
+            self.openai_model_combo.configure(state="readonly")
+            self.api_key_entry.configure(state="normal")
         else:
-            self.advanced_model_combo.configure(state="disabled")
+            self.local_model_combo.configure(state="disabled")
+            self.openai_model_combo.configure(state="disabled")
+            self.api_key_entry.configure(state="disabled")
 
     def _pick_style_guide(self) -> None:
         selected = filedialog.askopenfilename(
@@ -694,9 +767,38 @@ class BookToLatexGUI:
         self.readiness_label.configure(text="Checking local AI models…")
 
         def load() -> None:
-            self.events.put(("ollama_models", ollama_connection_info(timeout=4.0)))
+            self.events.put(("local_models", discover_local_ai(timeout=2.0, auto_start_ollama=True)))
 
         threading.Thread(target=load, daemon=True).start()
+
+    def _test_openai_connection(self) -> None:
+        key = self.api_key_var.get().strip()
+        if not key:
+            messagebox.showinfo(
+                "OpenAI needs an API key",
+                "Select Get an OpenAI API key, copy your private key, and paste it here. The model is already selected for you.",
+            )
+            return
+        self.ai_connection_status_var.set("Testing OpenAI and loading the models available to your account…")
+
+        def test() -> None:
+            self.events.put(("openai_connection", openai_connection_info(key, timeout=15)))
+
+        threading.Thread(target=test, daemon=True).start()
+
+    def _install_local_ai(self) -> None:
+        if not messagebox.askyesno(
+            "Install recommended local AI?",
+            "The app will ask Ollama to download Qwen 3.5 9B, which can read both text and page images. The download is several gigabytes and may take a while. Continue?",
+        ):
+            return
+        self.ai_connection_status_var.set("Installing the recommended local AI model…")
+        self.readiness_label.configure(text="Installing local AI — this can take a while…")
+
+        def install() -> None:
+            self.events.put(("local_install", install_recommended_local_model()))
+
+        threading.Thread(target=install, daemon=True).start()
 
     def _check_for_updates(self) -> None:
         self.update_button.configure(state="disabled", text="Checking for updates…")
@@ -712,10 +814,13 @@ class BookToLatexGUI:
             text=f"Check for updates (v{APP_VERSION})",
         )
         if not info.get("success"):
-            messagebox.showerror(
+            if messagebox.askyesno(
                 "Could not check for updates",
-                f"The GitHub release page could not be reached.\n\n{info.get('error') or 'Unknown connection error'}",
-            )
+                "The automatic check could not reach GitHub.\n\n"
+                f"{info.get('error') or 'Unknown connection error'}\n\n"
+                "Open the official release page in your browser instead?",
+            ):
+                webbrowser.open(str(info.get("release_url")))
             return
         latest = str(info.get("latest_version") or "")
         if not info.get("update_available"):
@@ -730,59 +835,119 @@ class BookToLatexGUI:
         ):
             webbrowser.open(str(info.get("release_url")))
 
-    def _handle_ollama_models(self, info: dict[str, object]) -> None:
-        models = info.get("models") or []
-        self.local_model_names = [str(model["name"]) for model in models]
-        if hasattr(self, "advanced_model_combo"):
-            self.advanced_model_combo.configure(values=self.local_model_names)
-        text_model = self._find_text_model()
-        if text_model and not self.advanced_model_var.get():
-            self.advanced_model_var.set(text_model)
-        if info.get("available") and self.local_model_names:
+    def _handle_local_models(self, info: dict[str, object]) -> None:
+        self.local_models = [dict(model) for model in (info.get("models") or [])]
+        self.local_model_by_label = {}
+        for model in self.local_models:
+            name = str(model.get("name") or "")
+            source = str(model.get("source") or "Local AI")
+            capability = "text + images" if model.get("vision") else "text"
+            label = f"{name} — {source}, {capability}"
+            self.local_model_by_label[label] = model
+        if hasattr(self, "local_model_combo") and self.local_model_combo.winfo_exists():
+            self.local_model_combo.configure(values=list(self.local_model_by_label))
+        selected = self._find_text_model()
+        if selected:
+            label = next(
+                (label for label, item in self.local_model_by_label.items() if item is selected),
+                "",
+            )
+            if label and self.local_model_var.get() not in self.local_model_by_label:
+                self.local_model_var.set(label)
+        model_files = list(info.get("model_files") or [])
+        if info.get("available") and self.local_models:
             has_vision = bool(self._find_vision_model())
             vision_note = "vision AI ready" if has_vision else "vision AI not installed"
             uncensored_note = (
                 "UNCENSORED local model ready · "
-                if "book-latex-qwen3-local-uncensored:8b" in self.local_model_names
+                if any(str(model.get("name")) == "book-latex-qwen3-local-uncensored:8b" for model in self.local_models)
                 else ""
             )
             self.readiness_label.configure(
-                text=f"Ready: {uncensored_note}OCR, PDF analysis and PDF compilation available ({vision_note})."
+                text=f"Ready: {uncensored_note}{len(self.local_models)} local model(s) detected; {vision_note}."
             )
-        elif info.get("available"):
+            self.ai_connection_status_var.set(
+                f"Found {len(self.local_models)} ready local model(s). Automatic will choose the right one."
+            )
+        elif model_files:
             self.readiness_label.configure(
-                text="Ready without AI. OCR and PDF compilation are available."
+                text=f"Found {len(model_files)} local model file(s), but their local AI app/server is not running."
+            )
+            self.ai_connection_status_var.set(
+                "Local model files were found. Start Ollama, LM Studio, Jan, GPT4All, or llama.cpp, then select Search this computer again."
             )
         else:
             self.readiness_label.configure(
                 text="Ready without local AI. OCR and PDF compilation are available."
             )
+            self.ai_connection_status_var.set(
+                "No ready local AI was found. You can use OpenAI or install the recommended local model."
+            )
+        self._update_advanced_ai_state()
 
-    def _find_text_model(self) -> str | None:
+    def _handle_openai_connection(self, info: dict[str, object]) -> None:
+        if not info.get("available"):
+            self.ai_connection_status_var.set(f"OpenAI connection failed: {info.get('error')}")
+            messagebox.showerror("OpenAI could not connect", str(info.get("error") or "Unknown error"))
+            return
+        models = [str(model) for model in (info.get("models") or [])]
+        for model in models:
+            if model not in self.openai_model_by_label.values():
+                self.openai_model_by_label[f"Available to your account — {model}"] = model
+        if models:
+            selected_model = models[0]
+            selected_label = next(
+                label for label, model in self.openai_model_by_label.items() if model == selected_model
+            )
+            self.openai_model_var.set(selected_label)
+        if hasattr(self, "openai_model_combo") and self.openai_model_combo.winfo_exists():
+            self.openai_model_combo.configure(values=list(self.openai_model_by_label))
+        self.ai_connection_status_var.set(
+            "OpenAI is connected. A page-image-capable model has been selected automatically."
+        )
+
+    def _handle_local_install(self, info: dict[str, object]) -> None:
+        if info.get("success"):
+            self.ai_connection_status_var.set("The recommended local AI is installed and ready.")
+            self.ai_choice_var.set(AI_AUTO)
+            self._refresh_local_models()
+            messagebox.showinfo("Local AI ready", "The recommended text-and-image model is installed. Automatic can now use it.")
+            return
+        self.ai_connection_status_var.set(f"Local AI installation could not finish: {info.get('error')}")
+        if info.get("needs_ollama") and messagebox.askyesno(
+            "Install Ollama first",
+            "Ollama is required to run the recommended model privately. Open the Ollama download page now?",
+        ):
+            webbrowser.open("https://ollama.com/download")
+            return
+        messagebox.showerror("Local AI installation could not finish", str(info.get("error") or "Unknown error"))
+
+    def _find_text_model(self) -> dict[str, object] | None:
         preferred = [
             "book-latex-qwen3-local-uncensored:8b",
             "book-latex-qwen3:8b",
             "qwen3:8b",
         ]
         for name in preferred:
-            if name in self.local_model_names:
-                return name
-        return next((name for name in self.local_model_names if not self._looks_visual(name)), None)
+            found = next((model for model in self.local_models if str(model.get("name")) == name), None)
+            if found:
+                return found
+        return next(
+            (model for model in self.local_models if not bool(model.get("vision"))),
+            self.local_models[0] if self.local_models else None,
+        )
 
-    def _find_vision_model(self) -> str | None:
+    def _find_vision_model(self) -> dict[str, object] | None:
         preferred = ["book-latex-qwen35-vision:9b", "qwen3.5:9b"]
         for name in preferred:
-            if name in self.local_model_names:
-                return name
-        return next((name for name in self.local_model_names if self._looks_visual(name)), None)
+            found = next((model for model in self.local_models if str(model.get("name")) == name), None)
+            if found:
+                return found
+        return next((model for model in self.local_models if bool(model.get("vision"))), None)
 
     @staticmethod
     def _looks_visual(model_name: str) -> bool:
-        lowered = model_name.lower()
-        return any(
-            token in lowered
-            for token in ("vision", "-vl", "qwen3.5", "qwen35", "llava", "gpt-4o", "gpt-4.1")
-        )
+        return model_supports_vision(model_name)
 
     def _read_numbers(self) -> dict[str, Any] | None:
         try:
@@ -800,42 +965,84 @@ class BookToLatexGUI:
         except ValueError:
             messagebox.showerror(
                 "Check advanced settings",
-                "One of the numeric Advanced settings contains invalid text.",
+                "One of the numeric More settings fields contains invalid text.",
             )
             return None
 
-    def _choose_ai(self, look: str) -> tuple[str, str, str, bool, bool] | None:
+    def _choose_ai(self, look: str) -> tuple[str, str, str, bool, bool, str] | None:
         choice = self.ai_choice_var.get()
         if look == LOOK_EXACT:
-            return "openai", "", DEFAULT_OPENAI_COMPAT_ENDPOINT, True, False
+            return "openai", "", DEFAULT_OPENAI_COMPAT_ENDPOINT, True, False, ""
         if choice == AI_NONE:
-            return "openai", "", DEFAULT_OPENAI_COMPAT_ENDPOINT, True, False
+            return "openai", "", DEFAULT_OPENAI_COMPAT_ENDPOINT, True, False, ""
         if choice == AI_OPENAI:
-            model = self.advanced_model_var.get().strip()
-            if not model:
-                messagebox.showerror("Missing AI model", "Enter the online model in Advanced settings.")
+            key = self.api_key_var.get().strip() or os.environ.get("OPENAI_API_KEY", "").strip()
+            if not key:
+                messagebox.showerror(
+                    "OpenAI needs one API key",
+                    "The OpenAI model is already selected. Select Choose or set up AI, get an OpenAI API key, and paste it into the single key box.",
+                )
+                self._open_advanced("ai")
                 return None
-            return "openai", model, self.endpoint_var.get().strip(), False, False
+            model = self.openai_model_by_label.get(
+                self.openai_model_var.get(),
+                "gpt-5.6-terra",
+            )
+            return "openai", model, DEFAULT_OPENAI_COMPAT_ENDPOINT, False, True, key
         if choice == AI_OLLAMA:
-            model = self.advanced_model_var.get().strip()
-            if not model:
-                messagebox.showerror("Missing local model", "Select an Ollama model in Advanced settings.")
+            selected = self.local_model_by_label.get(self.local_model_var.get()) or self._find_text_model()
+            if not selected:
+                messagebox.showerror(
+                    "No ready local AI found",
+                    "Select Choose or set up AI, then search again, install the recommended local AI, or choose OpenAI.",
+                )
+                self._open_advanced("ai")
                 return None
-            return "ollama", model, DEFAULT_OLLAMA_ENDPOINT, False, self._looks_visual(model)
+            return (
+                str(selected.get("provider") or "ollama"),
+                str(selected.get("name") or ""),
+                str(selected.get("endpoint") or DEFAULT_OLLAMA_ENDPOINT),
+                False,
+                bool(selected.get("vision")),
+                "",
+            )
 
         if look == LOOK_CLOSE:
-            model = self._find_vision_model()
-            if not model:
-                messagebox.showerror(
-                    "Vision model required",
-                    "Enhancing a scan or lecture needs the local vision model. Run setup_local_model.bat, then reopen the app.",
+            selected = self._find_vision_model()
+            if selected:
+                return (
+                    str(selected.get("provider") or "ollama"),
+                    str(selected.get("name") or ""),
+                    str(selected.get("endpoint") or DEFAULT_OLLAMA_ENDPOINT),
+                    False,
+                    True,
+                    "",
                 )
-                return None
-            return "ollama", model, DEFAULT_OLLAMA_ENDPOINT, False, True
-        model = self._find_text_model()
-        if model:
-            return "ollama", model, DEFAULT_OLLAMA_ENDPOINT, False, False
-        return "openai", "", DEFAULT_OPENAI_COMPAT_ENDPOINT, True, False
+            key = self.api_key_var.get().strip() or os.environ.get("OPENAI_API_KEY", "").strip()
+            if key:
+                model = self.openai_model_by_label.get(self.openai_model_var.get(), "gpt-5.6-terra")
+                return "openai", model, DEFAULT_OPENAI_COMPAT_ENDPOINT, False, True, key
+            messagebox.showerror(
+                "One AI choice is needed for enhanced pages",
+                "No page-image model is ready yet. Select Choose or set up AI, then either paste an OpenAI API key or install the recommended private local AI. You will not need to type a model name.",
+            )
+            self._open_advanced("ai")
+            return None
+        selected = self._find_text_model()
+        if selected:
+            return (
+                str(selected.get("provider") or "ollama"),
+                str(selected.get("name") or ""),
+                str(selected.get("endpoint") or DEFAULT_OLLAMA_ENDPOINT),
+                False,
+                bool(selected.get("vision")),
+                "",
+            )
+        key = self.api_key_var.get().strip() or os.environ.get("OPENAI_API_KEY", "").strip()
+        if key:
+            model = self.openai_model_by_label.get(self.openai_model_var.get(), "gpt-5.6-terra")
+            return "openai", model, DEFAULT_OPENAI_COMPAT_ENDPOINT, False, True, key
+        return "openai", "", DEFAULT_OPENAI_COMPAT_ENDPOINT, True, False, ""
 
     def _start(self) -> None:
         if self.running:
@@ -868,7 +1075,7 @@ class BookToLatexGUI:
         selected_ai = self._choose_ai(look)
         if selected_ai is None:
             return
-        provider, model, endpoint, no_llm, model_is_visual = selected_ai
+        provider, model, endpoint, no_llm, model_is_visual, api_key = selected_ai
         if look == LOOK_CLOSE and not model_is_visual and not no_llm:
             messagebox.showerror(
                 "Vision model required",
@@ -905,7 +1112,7 @@ class BookToLatexGUI:
             "provider": provider,
             "model": model,
             "endpoint": endpoint,
-            "api_key": self.api_key_var.get().strip(),
+            "api_key": api_key,
             "no_llm": no_llm,
             "strict_mode": True,
             "match_mode": MATCH_MODE_PERCENT,
@@ -1059,8 +1266,12 @@ class BookToLatexGUI:
                         maximum=max(total, 1), value=min(current, max(total, 1))
                     )
                     self.status_label.configure(text=message)
-                elif kind == "ollama_models":
-                    self._handle_ollama_models(value)
+                elif kind == "local_models":
+                    self._handle_local_models(value)
+                elif kind == "openai_connection":
+                    self._handle_openai_connection(value)
+                elif kind == "local_install":
+                    self._handle_local_install(value)
                 elif kind == "update_check":
                     self._handle_update_check(value)
                 elif kind == "result":

@@ -83,7 +83,7 @@ Temporary page renders and unused extracted images are deleted. Required `_asset
 
 ## Technical controls are optional
 
-The main window intentionally hides model names, endpoints, OCR switches, token limits, retries and matching percentages. Select **Advanced settings** only if you need a page range, poetry line-break preservation, another AI service, a custom style guide, or graph controls.
+The main window intentionally hides model names, connection addresses, OCR switches, token limits, retries and matching percentages. Select **Choose or set up AI** when you want OpenAI or a specific local model. Select **More settings** only for page ranges, poetry line-break preservation, a custom style guide, or graph controls.
 
 ## Understanding conversion methods
 
@@ -100,11 +100,13 @@ Advantages:
 
 It does not infer headings, tables, complex formulas, or semantic formatting.
 
-### Ollama — private AI on this computer
+### Local AI — private on this computer
 
-Ollama runs AI models locally. At startup, the app automatically lists every installed Ollama model and selects the recommended Book-to-LaTeX model. Select another model from the dropdown or use **Refresh local models** after installing one—no model name or endpoint needs to be typed.
+At startup, the app searches for ready models in Ollama, LM Studio, Jan, GPT4All and llama.cpp. It also checks the common macOS, Windows and Linux model folders used by Ollama, LM Studio, Hugging Face, GGUF, Safetensors and MLX. Ready models appear as simple choices with their app name and whether they understand text or text plus images.
 
-Run `setup_local_model.ps1` to install the two configured models:
+If model files exist but their local server is not running, the app tells you which local AI application to start. Select **Search this computer again** afterward. Select **Install recommended local AI** for a guided Ollama/Qwen 3.5 installation that works on Windows, macOS and Linux. No model name or connection address needs to be typed.
+
+Source-checkout users on Windows can still run `setup_local_model.ps1` to install the configured models:
 
 - `book-latex-qwen3-local-uncensored:8b` for clean editable conversion from the exact local Qwen3 safetensors;
 - `book-latex-qwen3:8b` as a fallback text model;
@@ -116,7 +118,7 @@ The result depends on the selected model and available computer memory. Always i
 
 Select **Let a vision AI inspect each PDF/image page** with a model whose name contains `vision`, `VL`, or `qwen3.5`. The app sends a rendered page picture alongside layout-preserved text. This lets the model interpret stacked fractions, summation limits, superscripts, matrices, cases, diagrams, and columns that plain text extraction damages.
 
-The text-only local Qwen3 models cannot inspect images. **Enhance a scan or lecture** automatically uses the installed Qwen3.5 vision model.
+The text-only local Qwen3 models cannot inspect images. **Enhance a scan or lecture** automatically uses a detected vision model. If none is ready, the app opens a clear choice between the guided local installation and OpenAI; it never shows a Windows `.bat` instruction on macOS.
 
 ### Project style guide
 
@@ -126,13 +128,9 @@ An optional TXT/Markdown style guide is applied to every page. Use it to define 
 
 With vision enabled, the graph option asks for editable TikZ/pgfplots code. The prompt forbids guessed coordinates or statistics, but graph code must still be checked against the source.
 
-### OpenAI-compatible service
+### OpenAI — online
 
-Enter:
-
-- the exact model name;
-- the service's chat-completions address;
-- its API key.
+Select **Choose or set up AI → OpenAI — online**. The app already supplies the correct service address and offers three understandable model choices: balanced, best quality, and lower cost. The balanced model is selected automatically. Select **Get an OpenAI API key**, paste the private key into the only required box, and optionally select **Test connection and choose model**. You do not type a model name or endpoint.
 
 The app sends one page of extracted text per request. The API key stays in memory and is not placed in the LaTeX project or review report. The service itself may retain requests according to its own policies.
 
@@ -194,7 +192,7 @@ Temporary page images are deleted automatically. The compiler log is deleted aft
 
 ### Optional detailed review
 
-Enable **Create a detailed per-page review** under Advanced settings when you need `review_report.html`. It opens in a normal browser and shows:
+Enable **Create a detailed per-page review** under More settings when you need `review_report.html`. It opens in a normal browser and shows:
 
 - the source and LaTeX side by side;
 - the text-match percentage;
@@ -217,7 +215,7 @@ The app asks pdfLaTeX to compile English projects and XeLaTeX to compile Arabic 
 
 Install [MiKTeX](https://miktex.org/download) on Windows or macOS. On Linux, install TeX Live from the distribution package manager. Restart the app afterward.
 
-## Advanced options
+## More settings
 
 | Option | Meaning |
 |---|---|
@@ -266,20 +264,15 @@ Install both parts when running from source:
 
 Restart the app. On Windows, the app checks `C:\Program Files\Tesseract-OCR\tesseract.exe` automatically.
 
-### Ollama connection fails
+### A local model is not listed
 
-Confirm that:
+Select **Choose or set up AI → Search this computer again**. The app searches common model stores and ready local servers. If it reports model files but no ready model, open the application that owns them and start its local server. Ollama is started automatically when the executable can be found. LM Studio, Jan, GPT4All and llama.cpp must expose their local API before another app can use the model.
 
-- Ollama is open/running;
-- the model is installed;
-- the model name exactly matches Ollama;
-- the address is `http://127.0.0.1:11434/api/chat` unless Ollama was customized.
-
-The affected page will use safe local conversion and appear in the review report.
+You can instead select **Install recommended local AI**; the app guides Ollama through downloading a text-and-image model on Windows, macOS or Linux.
 
 ### Online AI reports unauthorized
 
-Check the API key, model name, and connection address. Some providers use a different OpenAI-compatible address.
+Select **Get an OpenAI API key**, paste the key, then select **Test connection and choose model**. The app supplies the model name and connection address automatically.
 
 ### The output uses more pages than expected
 

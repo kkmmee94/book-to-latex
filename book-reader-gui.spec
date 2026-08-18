@@ -1,5 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files
+
 
 a = Analysis(
     ['book_to_latex_gui.py'],
@@ -9,7 +11,7 @@ a = Analysis(
         ('assets/tessdata/ara.traineddata', 'assets/tessdata'),
         ('assets/tessdata/LICENSE', 'assets/tessdata'),
         ('assets/tessdata/README.md', 'assets/tessdata'),
-    ],
+    ] + collect_data_files('certifi'),
     hiddenimports=['PIL.Image', 'pytesseract'],
     hookspath=[],
     hooksconfig={},

@@ -2,14 +2,14 @@
 set -euo pipefail
 
 project_root="$(cd "$(dirname "$0")/../.." && pwd)"
-version="${1:-1.3.1}"
+version="${1:-1.3.2}"
 volume_root="$project_root/build/macos-dmg"
 dmg_path="$project_root/dist/Book-to-LaTeX-${version}-macOS.dmg"
 
 cd "$project_root"
 python -m PyInstaller --noconfirm --clean --windowed --name "Book to LaTeX" \
   --add-data "assets/tessdata:assets/tessdata" \
-  --hidden-import PIL.Image --hidden-import pytesseract \
+  --hidden-import PIL.Image --hidden-import pytesseract --collect-data certifi \
   book_to_latex_gui.py
 
 rm -rf "$volume_root"
