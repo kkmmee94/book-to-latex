@@ -30,9 +30,9 @@ from book_to_latex import (
     runtime_capabilities,
 )
 
-LOOK_CLEAN = "Reconstruct and polish (fully editable) — إعادة بناء محسّنة"
-LOOK_CLOSE = "Enhance a scan or lecture — تحسين المسح أو المحاضرة"
-LOOK_EXACT = "Keep original pages unchanged — الصفحات الأصلية دون تغيير"
+LOOK_CLEAN = "Reconstruct and polish (fully editable)"
+LOOK_CLOSE = "Enhance a scan or lecture"
+LOOK_EXACT = "Keep original pages unchanged"
 COLOUR_KEEP = "Keep the original colours"
 COLOUR_MONO = "Black and white"
 AI_AUTO = "Automatic (recommended)"
@@ -54,11 +54,11 @@ PHOTO_LABELS = {
     "Replace photographs with descriptions": PHOTO_DESCRIBE,
 }
 LANGUAGE_LABELS = {
-    "Detect automatically — اكتشاف تلقائي": "auto",
-    "English — الإنجليزية": "eng",
-    "Arabic — العربية": "ara",
-    "Chinese (Simplified) — الصينية المبسطة": "chi_sim",
-    "Chinese (Traditional) — الصينية التقليدية": "chi_tra",
+    "Detect automatically": "auto",
+    "English": "eng",
+    "Arabic": "ara",
+    "Chinese (Simplified)": "chi_sim",
+    "Chinese (Traditional)": "chi_tra",
 }
 
 def _read_csv_rows(path: Path) -> list[dict]:
@@ -137,7 +137,7 @@ def _find_vision_model(models: list[str]) -> str | None:
 st.set_page_config(page_title="Book to LaTeX & PDF", page_icon="📘", layout="wide")
 st.title("📘 Book → LaTeX & PDF")
 st.caption("Choose how the finished result should look. OCR, AI, checking and PDF compilation happen automatically.")
-if st.button(f"Check for updates — التحقق من التحديثات (v{APP_VERSION})"):
+if st.button(f"Check for updates (v{APP_VERSION})"):
     update_info = check_for_updates(timeout=10)
     if not update_info.get("success"):
         st.error(f"Could not check GitHub: {update_info.get('error')}")
