@@ -88,7 +88,7 @@ OPENAI_RECOMMENDED_MODELS = (
     "gpt-5.6-sol",
     "gpt-5.6-luna",
 )
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.3.3"
 GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/kkmmee94/book-to-latex/releases/latest"
 
 DOCUMENT_LANGUAGES = {
@@ -3165,7 +3165,7 @@ def _repair_tabular_columns(output_path: Path) -> list[str]:
     pattern = re.compile(
         r"\\begin\{tabular\}(?P<position>\[[^\]]*\])?"
         r"\{(?P<spec>(?:[^{}]|\{[^{}]*\})*)\}"
-        r"(?P<body>.*?)\\end\{tabular\}",
+        r"(?P<body>(?:(?!\\begin\{tabular\}).)*?)\\end\{tabular\}",
         re.DOTALL,
     )
     repairs: list[str] = []
@@ -3209,12 +3209,23 @@ def _ensure_generated_preamble(output_path: Path) -> list[str]:
     """Add standard packages when generated body commands require them."""
     source = output_path.read_text(encoding="utf-8", errors="replace")
     requirements = [
+        (r"\includegraphics", r"\usepackage{graphicx}", "embedded graphics"),
+        (r"\begin{tikzpicture}", r"\usepackage{tikz}", "TikZ diagrams"),
+        (r"\begin{axis}", r"\usepackage{pgfplots}", "pgfplots charts"),
+        (r"\begin{axis}", r"\pgfplotsset{compat=1.18}", "current pgfplots compatibility"),
+        ("boxplot prepared", r"\usepgfplotslibrary{statistics}", "pgfplots box plots"),
+        (
+            r"\begin{example}",
+            r"\newenvironment{example}{\par\medskip\noindent\textbf{Example.}\ }{\par\medskip}",
+            "the example environment",
+        ),
         (r"\multirow", r"\usepackage{multirow}", "multirow tables"),
         (r"\begin{longtable}", r"\usepackage{longtable}", "long tables"),
         (r"\begin{adjustbox}", r"\usepackage{adjustbox}", "adjusted boxes"),
         (r"\begin{multicols}", r"\usepackage{multicol}", "multiple columns"),
         (r"\begin{landscape}", r"\usepackage{pdflscape}", "landscape pages"),
         (r"\SI{", r"\usepackage{siunitx}", "scientific units"),
+        ("phi(", r"\usepackage{pgf}", "PGF mathematics"),
         (
             "phi(",
             r"\pgfmathdeclarefunction{phi}{1}{\pgfmathparse{exp(-#1*#1/2)/sqrt(2*pi)}}",
@@ -3223,6 +3234,16 @@ def _ensure_generated_preamble(output_path: Path) -> list[str]:
     ]
     packages: list[str] = []
     repairs: list[str] = []
+    if r"\begin{example}" in source and r"\usepackage{amsthm}" in source:
+        source = source.replace(r"\usepackage{amsthm}" + "\n", "", 1)
+        repairs.append("Removed an unnecessary theorem-package dependency")
+    if r"\newtheorem{example}{Example}" in source:
+        source = source.replace(
+            r"\newtheorem{example}{Example}",
+            r"\newenvironment{example}{\par\medskip\noindent\textbf{Example.}\ }{\par\medskip}",
+            1,
+        )
+        repairs.append("Replaced the example theorem with a self-contained environment")
     for body_marker, package_line, description in requirements:
         if body_marker in source and package_line not in source:
             packages.append(package_line)
@@ -3233,8 +3254,49 @@ def _ensure_generated_preamble(output_path: Path) -> list[str]:
             "\n".join(packages) + "\n\\begin{document}",
             1,
         )
+    pgf_package = r"\usepackage{pgf}"
+    pgf_declaration = r"\pgfmathdeclarefunction"
+    if (
+        pgf_package in source
+        and pgf_declaration in source
+        and source.index(pgf_package) > source.index(pgf_declaration)
+    ):
+        source = source.replace(pgf_package + "\n", "", 1)
+        source = source.replace(pgf_declaration, pgf_package + "\n" + pgf_declaration, 1)
+        repairs.append("Moved PGF mathematics support before its function declaration")
+    if packages or repairs:
         output_path.write_text(source, encoding="utf-8")
     return repairs
+
+
+def _repair_lists_inside_tabular(output_path: Path) -> list[str]:
+    """Remove outer tabular wrappers that illegally contain paragraph-mode lists."""
+    source = output_path.read_text(encoding="utf-8", errors="replace")
+    lines = source.splitlines()
+    stack: list[dict[str, object]] = []
+    remove_indexes: set[int] = set()
+    count = 0
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith(r"\begin{tabular}"):
+            stack.append({"start": index, "has_list": False})
+            continue
+        if stripped.startswith((r"\begin{itemize}", r"\begin{enumerate}")) and stack:
+            stack[-1]["has_list"] = True
+            continue
+        if stripped.startswith(r"\end{tabular}") and stack:
+            current = stack.pop()
+            if current["has_list"]:
+                remove_indexes.update({int(current["start"]), index})
+                count += 1
+    if not count:
+        return []
+    repaired = [line for index, line in enumerate(lines) if index not in remove_indexes]
+    output_path.write_text(
+        "\n".join(repaired) + ("\n" if source.endswith("\n") else ""),
+        encoding="utf-8",
+    )
+    return [f"Removed {count} tabular wrapper(s) that illegally contained a list"]
 
 
 def _repair_tikz_compatibility(output_path: Path) -> list[str]:
@@ -3266,12 +3328,36 @@ def _repair_tikz_compatibility(output_path: Path) -> list[str]:
     color_name_count += lavender_count
     repaired, lightyellow_count = re.subn(r"\blightyellow(?=[!,}\]])", "yellow", repaired)
     color_name_count += lightyellow_count
+    repaired, line_width_separator_count = re.subn(
+        r"\bline\s+width\s*:\s*",
+        "line width=",
+        repaired,
+    )
     repaired, undefined_tick_count = re.subn(r"\(\\tickx\s*,", "(0,", repaired)
     repaired, tick_key_count = re.subn(
         r",\s*[xy]tick\s+distance\s*=\s*[-+]?\d*\.?\d+",
         "",
         repaired,
     )
+    repaired, malformed_tick_label_count = re.subn(
+        r"(?m)^\s*xticklabel\s*=\s*\{\\nosep\\year\},?\s*$",
+        "% Removed malformed AI-generated tick label",
+        repaired,
+    )
+
+    def compact_axis_options(match: re.Match[str]) -> str:
+        body, count = re.subn(r"\r?\n\s*\r?\n", "\n", match.group("body"))
+        compact_axis_options.count += count
+        return match.group("start") + body + match.group("end")
+
+    compact_axis_options.count = 0  # type: ignore[attr-defined]
+    repaired = re.sub(
+        r"(?P<start>\\begin\{axis\}\[)(?P<body>.*?)(?P<end>\]\s*)",
+        compact_axis_options,
+        repaired,
+        flags=re.DOTALL,
+    )
+    axis_option_blank_count = compact_axis_options.count  # type: ignore[attr-defined]
     repaired, triangle_shape_count = re.subn(
         r"(\[(?:[^\[\]]*,\s*)?)triangle(?=\s*(?:,|\]))",
         r"\1regular polygon, regular polygon sides=3",
@@ -3354,10 +3440,16 @@ def _repair_tikz_compatibility(output_path: Path) -> list[str]:
         repairs.append(f"Repaired {comment_count} TikZ/comment line(s)")
     if tick_key_count:
         repairs.append(f"Removed {tick_key_count} pgfplots-only option(s) from TikZ pictures")
+    if malformed_tick_label_count:
+        repairs.append(f"Removed {malformed_tick_label_count} malformed pgfplots tick label option(s)")
+    if axis_option_blank_count:
+        repairs.append(f"Removed {axis_option_blank_count} blank line(s) from pgfplots options")
     if undefined_tick_count:
         repairs.append(f"Repaired {undefined_tick_count} undefined TikZ tick position(s)")
     if color_name_count:
         repairs.append(f"Normalized {color_name_count} TikZ/xcolor name(s)")
+    if line_width_separator_count:
+        repairs.append(f"Repaired {line_width_separator_count} malformed TikZ line-width option(s)")
     if undefined_series_count:
         repairs.append(f"Removed {undefined_series_count} TikZ series with undefined coordinates")
     if node_label_count:
@@ -3428,6 +3520,126 @@ def _repair_split_math_fragments(output_path: Path) -> list[str]:
     return []
 
 
+def _repair_standalone_pgfplots_axes(output_path: Path) -> list[str]:
+    """Wrap pgfplots axis environments that the model emitted without TikZ."""
+    source = output_path.read_text(encoding="utf-8", errors="replace")
+    lines = source.splitlines()
+    repaired: list[str] = []
+    tikz_depth = 0
+    wrapped_axis = False
+    count = 0
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(r"\begin{tikzpicture}"):
+            tikz_depth += 1
+        if stripped.startswith(r"\begin{axis}") and tikz_depth == 0:
+            repaired.append(r"\begin{tikzpicture}")
+            wrapped_axis = True
+            count += 1
+        repaired.append(line)
+        if stripped.startswith(r"\end{axis}") and wrapped_axis:
+            repaired.append(r"\end{tikzpicture}")
+            wrapped_axis = False
+        if stripped.startswith(r"\end{tikzpicture}"):
+            tikz_depth = max(tikz_depth - 1, 0)
+    if count:
+        output_path.write_text(
+            "\n".join(repaired) + ("\n" if source.endswith("\n") else ""),
+            encoding="utf-8",
+        )
+        return [f"Wrapped {count} standalone pgfplots axis environment(s) in TikZ"]
+    return []
+
+
+def _repair_bare_display_math(output_path: Path) -> list[str]:
+    """Wrap AI-emitted display formulas and standalone cases in math mode."""
+    source = output_path.read_text(encoding="utf-8", errors="replace")
+    source, dangling_power_count = re.subn(r"(?m)(\S)\^\s*$", r"\1^{}", source)
+    source, stray_clt_count = re.subn(r"\bCL\\T\b", "CLT", source)
+    lines = source.splitlines()
+    repaired_lines: list[str] = []
+    display_math = False
+    math_environment_depth = 0
+    wrapped_formula_count = 0
+    wrapped_cases_count = 0
+    math_env_names = ("equation", "align", "gather", "multline", "displaymath")
+    formula_tokens = (
+        r"\frac",
+        r"\dfrac",
+        r"\overline",
+        r"\bar",
+        r"\sqrt",
+        r"\sum",
+        r"\int",
+        r"\psi",
+        r"\Phi",
+        r"\hat",
+        r"\mathbb",
+        r"\mathrm",
+        r"\xrightarrow",
+        r"\rightarrow",
+        r"\leq",
+        r"\geq",
+        "_{",
+        "^{",
+    )
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+        for environment in math_env_names:
+            if f"\\begin{{{environment}" in stripped:
+                math_environment_depth += 1
+
+        if stripped == r"\begin{cases}" and not display_math and math_environment_depth == 0:
+            repaired_lines.append(r"\[")
+            while index < len(lines):
+                repaired_lines.append(lines[index])
+                if lines[index].strip() == r"\end{cases}":
+                    break
+                index += 1
+            repaired_lines.append(r"\]")
+            wrapped_cases_count += 1
+            index += 1
+            continue
+
+        outside_math = not display_math and math_environment_depth == 0
+        looks_like_formula = (
+            outside_math
+            and bool(stripped)
+            and "$" not in stripped
+            and not stripped.startswith((r"\begin", r"\end", r"\item", r"\section", "%"))
+            and any(token in stripped for token in formula_tokens)
+            and ("=" in stripped or r"\rightarrow" in stripped or r"\xrightarrow" in stripped)
+        )
+        if looks_like_formula:
+            repaired_lines.extend((r"\[", stripped, r"\]"))
+            wrapped_formula_count += 1
+        else:
+            repaired_lines.append(line)
+
+        if stripped == "$$" or stripped == r"\[" or stripped == r"\]":
+            display_math = not display_math
+        for environment in math_env_names:
+            if f"\\end{{{environment}" in stripped:
+                math_environment_depth = max(math_environment_depth - 1, 0)
+        index += 1
+
+    repaired = "\n".join(repaired_lines) + ("\n" if source.endswith("\n") else "")
+    repairs: list[str] = []
+    if wrapped_formula_count:
+        repairs.append(f"Wrapped {wrapped_formula_count} bare display formula(s) in math mode")
+    if wrapped_cases_count:
+        repairs.append(f"Wrapped {wrapped_cases_count} standalone cases block(s) in math mode")
+    if dangling_power_count:
+        repairs.append(f"Repaired {dangling_power_count} incomplete mathematical superscript(s)")
+    if stray_clt_count:
+        repairs.append(f"Repaired {stray_clt_count} stray LaTeX command in ordinary text")
+    if repairs:
+        output_path.write_text(repaired, encoding="utf-8")
+    return repairs
+
+
 def _repair_unicode_fragments(output_path: Path) -> list[str]:
     """Replace common Unicode math characters left in AI-generated LaTeX."""
     source = output_path.read_text(encoding="utf-8", errors="replace")
@@ -3437,8 +3649,17 @@ def _repair_unicode_fragments(output_path: Path) -> list[str]:
         "≤": r"$\leq$",
         "≥": r"$\geq$",
     }
-    repaired = source
-    count = 0
+    repaired, combining_hat_count = re.subn(
+        "([A-Za-z])\u0302",
+        r"\\hat{\1}",
+        source,
+    )
+    repaired, combining_bar_count = re.subn(
+        "([A-Za-z])\u0304",
+        r"\\bar{\1}",
+        repaired,
+    )
+    count = combining_hat_count + combining_bar_count
     for character, latex in replacements.items():
         occurrences = repaired.count(character)
         repaired = repaired.replace(character, latex)
@@ -3466,35 +3687,47 @@ def _compile_latex(output_path: Path, log_callback: LogCallback | None) -> dict[
 
     missing_graphics = _repair_missing_graphics(output_path)
     structural_repairs = _repair_tabular_columns(output_path)
+    list_table_repairs = _repair_lists_inside_tabular(output_path)
     preamble_repairs = _ensure_generated_preamble(output_path)
     tikz_repairs = _repair_tikz_compatibility(output_path)
+    axis_repairs = _repair_standalone_pgfplots_axes(output_path)
     float_repairs = _repair_inner_floats(output_path)
     bullet_repairs = _repair_text_mode_bullets(output_path)
     math_repairs = _repair_split_math_fragments(output_path)
+    display_math_repairs = _repair_bare_display_math(output_path)
     unicode_repairs = _repair_unicode_fragments(output_path)
     repairs = [
         *missing_graphics,
         *structural_repairs,
+        *list_table_repairs,
         *preamble_repairs,
         *tikz_repairs,
+        *axis_repairs,
         *float_repairs,
         *bullet_repairs,
         *math_repairs,
+        *display_math_repairs,
         *unicode_repairs,
     ]
     for reference in missing_graphics:
         _log(log_callback, f"Removed unavailable image reference before PDF creation: {reference}")
     for repair in structural_repairs:
         _log(log_callback, repair)
+    for repair in list_table_repairs:
+        _log(log_callback, repair)
     for repair in preamble_repairs:
         _log(log_callback, repair)
     for repair in tikz_repairs:
+        _log(log_callback, repair)
+    for repair in axis_repairs:
         _log(log_callback, repair)
     for repair in float_repairs:
         _log(log_callback, repair)
     for repair in bullet_repairs:
         _log(log_callback, repair)
     for repair in math_repairs:
+        _log(log_callback, repair)
+    for repair in display_math_repairs:
         _log(log_callback, repair)
     for repair in unicode_repairs:
         _log(log_callback, repair)

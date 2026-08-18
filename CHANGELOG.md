@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.3 — 2026-08-18
+
+- Fixed the complete `module01_latex_compile.log` failure chain in reconstructed-document mode.
+- Added missing TikZ, pgfplots, graphics, PGF mathematics, boxplot, and self-contained example-environment support when AI output uses them unexpectedly.
+- Added automatic math-mode wrapping for bare formulas and standalone `cases` blocks.
+- Added repairs for standalone pgfplots axes, malformed tick/line-width options, nested-table column counts, illegal list/table nesting, combining Unicode hats/bars, incomplete superscripts, and stray text commands.
+- Added an end-to-end regression fixture proving all reported reconstruction errors compile in one preflight pass.
+
 ## 1.3.2 — 2026-08-18
 
 - Fixed HTTPS certificate verification in packaged macOS builds by shipping a current CA bundle.
