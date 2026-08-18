@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Book to LaTeX
+Comment=Convert documents into LaTeX and compiled PDF
+Exec=book-to-latex-gui
+Icon=accessories-text-editor
+Terminal=false
+Categories=Office;Publishing;
+Keywords=PDF;LaTeX;OCR;Arabic;

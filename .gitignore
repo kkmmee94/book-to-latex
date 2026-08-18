@@ -1,0 +1,31 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.log
+*.aux
+*.out
+*.toc
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+*.exe
+
+# Generated book projects
+*_images/
+*_pages/
+*_review/
+*_compile.log
+*_complete.zip
+models/*.generated.Modelfile
+tools/
+tmp/
+
+# Local secrets and operating-system files
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
