@@ -1,5 +1,9 @@
 # Book to LaTeX & PDF
 
+[![Tests](https://github.com/kkmmee94/book-to-latex/actions/workflows/tests.yml/badge.svg)](https://github.com/kkmmee94/book-to-latex/actions/workflows/tests.yml)
+[![Release builds](https://github.com/kkmmee94/book-to-latex/actions/workflows/release.yml/badge.svg)](https://github.com/kkmmee94/book-to-latex/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A local-first desktop app, browser app, and command-line tool that turns documents into LaTeX and a compiled PDF. It is designed so a nontechnical user can choose a file, choose how closely the output should match it, and receive the result without configuring OCR, AI endpoints, or LaTeX commands.
 
 ## What the user receives

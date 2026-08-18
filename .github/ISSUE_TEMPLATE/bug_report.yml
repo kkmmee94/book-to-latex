@@ -1,0 +1,39 @@
+name: Bug report
+description: Report a reproducible conversion, installation, or interface problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Please remove private document content, API keys, and personal paths before posting.
+  - type: dropdown
+    id: interface
+    attributes:
+      label: Interface
+      options: [Windows GUI, macOS GUI, Linux GUI, Browser app, CLI]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include the smallest safe reproduction and the conversion report.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: tools
+    attributes:
+      label: Optional tools installed
+      description: MiKTeX/TeX Live, Tesseract, Ollama, Poppler, and LibreOffice versions if relevant.

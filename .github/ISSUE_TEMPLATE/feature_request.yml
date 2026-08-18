@@ -1,0 +1,23 @@
+name: Feature request
+description: Suggest a user-facing improvement or new language/format
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: User need
+      description: Describe the task in nontechnical terms.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Example formats or languages
+      description: Do not upload copyrighted or private documents without permission.
