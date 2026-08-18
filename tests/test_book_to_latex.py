@@ -314,6 +314,63 @@ class TextConversionTests(unittest.TestCase):
             self.assertTrue(any("multirow" in repair for repair in result["repairs"]))
             self.assertTrue(any("TikZ" in repair for repair in result["repairs"]))
 
+    def test_compile_repairs_nested_table_column_count(self) -> None:
+        if not shutil.which("pdflatex"):
+            self.skipTest("pdflatex is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "nested-table.tex"
+            output.write_text(
+                "\\documentclass{article}\n"
+                "\\begin{document}\n"
+                "\\begin{tabular}{cc}\n"
+                "Outer & table \\\\\n"
+                "\\begin{tabular}{c}\n"
+                "50 & Series1 \\\\\n"
+                "\\end{tabular} & End \\\\\n"
+                "\\end{tabular}\n"
+                "\\end{document}\n",
+                encoding="utf-8",
+            )
+            result = _compile_latex(output, None)
+            self.assertTrue(result["success"])
+            self.assertIn("*{2}{c}", output.read_text(encoding="utf-8"))
+
+    def test_compile_repairs_module01_reconstruction_failure_chain(self) -> None:
+        if not shutil.which("pdflatex"):
+            self.skipTest("pdflatex is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "module01-reconstruction.tex"
+            output.write_text(
+                "\\documentclass{book}\n"
+                "\\usepackage{amsmath}\n"
+                "\\pgfmathdeclarefunction{phi}{1}{\\pgfmathparse{exp(-#1*#1/2)}}\n"
+                "\\usepackage{pgf}\n"
+                "\\begin{document}\n"
+                "f_{X_1}(x_1) = f_X(x_1)\n"
+                "\\begin{cases}\n0 & \\text{if } x<0, \\\\\n1 & \\text{otherwise}.\n\\end{cases}\n"
+                "\\begin{tabular}{cc}\n"
+                "Outer & table \\\\\n"
+                "\\begin{tabular}{c}\n50 & Series1 \\\\\n\\end{tabular} & End \\\\\n"
+                "\\end{tabular}\n"
+                "\\begin{example}The quartile is $Q̂_1$.\\end{example}\n"
+                "\\begin{axis}[\n"
+                "xtick={1965,1966},\n"
+                "xticklabel={\\nosep\\year},\n"
+                "grid style={line width: 0.1pt, draw=gray!30}\n"
+                "]\n"
+                "\\addplot coordinates {(1965,1) (1966,2)};\n"
+                "\\end{axis}\n"
+                "\\end{document}\n",
+                encoding="utf-8",
+            )
+            result = _compile_latex(output, None)
+            self.assertTrue(result["success"])
+            self.assertFalse(output.with_name("module01-reconstruction_compile.log").exists())
+            repaired = output.read_text(encoding="utf-8")
+            self.assertLess(repaired.index(r"\usepackage{pgf}"), repaired.index(r"\pgfmathdeclarefunction"))
+            self.assertIn(r"\newenvironment{example}", repaired)
+            self.assertIn(r"\begin{tikzpicture}", repaired)
+
     def test_compile_repairs_bare_tikz_triangle_shape(self) -> None:
         if not shutil.which("pdflatex"):
             self.skipTest("pdflatex is not installed")
@@ -347,6 +404,62 @@ class TextConversionTests(unittest.TestCase):
             self.assertIn(r"\fill[blue] (Sample_1990) circle (2pt);", repaired)
             self.assertIn(r"\node[diamond, draw=blue, fill=blue", repaired)
             self.assertIn(r"\textcolor{red}{$\times$}", repaired)
+
+    def test_compile_adds_pgf_before_defining_normal_density(self) -> None:
+        if not shutil.which("pdflatex"):
+            self.skipTest("pdflatex is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "normal-density.tex"
+            output.write_text(
+                "\\documentclass{article}\n"
+                "\\begin{document}\n"
+                "The curve uses $phi(x)$.\n"
+                "\\end{document}\n",
+                encoding="utf-8",
+            )
+            result = _compile_latex(output, None)
+            self.assertTrue(result["success"])
+            repaired = output.read_text(encoding="utf-8")
+            self.assertIn(r"\usepackage{pgf}", repaired)
+            self.assertIn(r"\pgfmathdeclarefunction{phi}", repaired)
+
+    def test_compile_wraps_bare_formula_and_cases_blocks(self) -> None:
+        if not shutil.which("pdflatex"):
+            self.skipTest("pdflatex is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "bare-math.tex"
+            output.write_text(
+                "\\documentclass{article}\n"
+                "\\usepackage{amsmath}\n"
+                "\\begin{document}\n"
+                "f_{X_1}(x_1) = f_X(x_1)\n"
+                "\\begin{cases}\n"
+                "0 & \\text{if } x < 0, \\\\\n"
+                "1 & \\text{if } x \\geq 0.\n"
+                "\\end{cases}\n"
+                "The CL\\T applies.\n"
+                "The quartile is $Q̂_1$.\n"
+                "\\begin{tikzpicture}\n"
+                "\\begin{axis}\n"
+                "\\addplot coordinates {(0,0) (1,1)};\n"
+                "\\end{axis}\n"
+                "\\end{tikzpicture}\n"
+                "\\begin{axis}\n"
+                "\\addplot coordinates {(0,1) (1,0)};\n"
+                "\\end{axis}\n"
+                "\\end{document}\n",
+                encoding="utf-8",
+            )
+            result = _compile_latex(output, None)
+            self.assertTrue(result["success"])
+            repaired = output.read_text(encoding="utf-8")
+            self.assertIn("\\[\nf_{X_1}(x_1) = f_X(x_1)\n\\]", repaired)
+            self.assertIn("\\[\n\\begin{cases}", repaired)
+            self.assertIn("The CLT applies.", repaired)
+            self.assertIn(r"$\hat{Q}_1$", repaired)
+            self.assertIn(r"\usepackage{tikz}", repaired)
+            self.assertIn(r"\usepackage{pgfplots}", repaired)
+            self.assertEqual(repaired.count(r"\begin{tikzpicture}"), 2)
 
     def test_compile_repairs_floats_inside_one_page_boxes(self) -> None:
         if not shutil.which("pdflatex"):
