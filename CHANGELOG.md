@@ -1,8 +1,13 @@
 # Changelog
 
+## 1.3.1 — 2026-08-18
+
+- Restored a consistently English application interface.
+- Arabic selection now affects only the generated document's language and RTL layout; it no longer mixes Arabic into English controls.
+
 ## 1.3.0 — 2026-08-18
 
-- Renamed the main workflows to Reconstruct and polish, Enhance a scan or lecture, and Keep original pages unchanged, with Arabic translations.
+- Renamed the main workflows to Reconstruct and polish, Enhance a scan or lecture, and Keep original pages unchanged.
 - Added a Check for updates button backed by the public GitHub release feed.
 - Added automatic Arabic/Chinese script detection and on-demand official Tesseract language-data installation.
 - Added Chinese Unicode XeLaTeX/CTeX compilation.

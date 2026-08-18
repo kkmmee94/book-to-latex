@@ -1,5 +1,5 @@
 #define AppName "Book to LaTeX"
-#define AppVersion "1.3.0"
+#define AppVersion "1.3.1"
 #define AppExeName "book-reader.exe"
 
 [Setup]

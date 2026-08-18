@@ -14,7 +14,7 @@ The app checks automatically whether a PDF page has readable text and uses OCR o
 2. Select **Choose file…**.
 3. Select the file you want to convert. The chooser includes an **All files** option.
 4. The app suggests a filename ending in `_latex.tex`. Change it only if desired.
-5. Choose **Reconstruct and polish**, **Enhance a scan or lecture**, or **Keep original pages unchanged**. The main names include Arabic translations.
+5. Choose **Reconstruct and polish**, **Enhance a scan or lecture**, or **Keep original pages unchanged**.
 6. Choose the finished page size: same as the source, A4, or US Letter.
 7. For editable modes, choose compact flow or keep every source page separate.
 8. Choose whether real photographs stay visible or become descriptions.
@@ -42,17 +42,17 @@ Before the optional LLM is called, the app extracts readable text, slide content
 
 ## Understanding the three output styles
 
-### Reconstruct and polish — إعادة بناء محسّنة
+### Reconstruct and polish
 
 Use this for almost every manuscript. The generated words are actual LaTeX text that can be edited, searched, copied, and restyled.
 
 This mode tries to preserve content, not exact typography or page coordinates. PDF text extraction does not reliably expose every font, column, margin, or floating picture.
 
-### Enhance a scan or lecture — تحسين المسح أو المحاضرة
+### Enhance a scan or lecture
 
 This automatically uses the installed vision model. It reads the rendered page image together with layout-preserved extracted text and reconstructs mathematics, tables, columns, colors and structure as editable LaTeX. It aims to stay close, but it is not an identical copy; exact coordinates and fonts are not guaranteed.
 
-### Keep original pages unchanged — الصفحات الأصلية دون تغيير
+### Keep original pages unchanged
 
 For PDFs, this places each original PDF page directly into the LaTeX output. It preserves shapes, colors, headers, footers, photographs and the entire page image. It does not create a folder containing hundreds of temporary page pictures. Use it when appearance is more important than editing.
 
@@ -170,7 +170,7 @@ Automatic detection is recommended. The app detects Arabic and Chinese scripts f
 
 ## Checking for updates
 
-Select **Check for updates — التحقق من التحديثات**. The app reads the public GitHub latest-release record, compares it with the installed version, and offers to open the official download page when a newer version exists. It never silently replaces the running application.
+Select **Check for updates**. The app reads the public GitHub latest-release record, compares it with the installed version, and offers to open the official download page when a newer version exists. It never silently replaces the running application.
 
 ## Quality options
 

@@ -37,9 +37,9 @@ from book_to_latex import (
     runtime_capabilities,
 )
 
-LOOK_CLEAN = "Reconstruct and polish (fully editable) — إعادة بناء محسّنة"
-LOOK_CLOSE = "Enhance a scan or lecture — تحسين المسح أو المحاضرة"
-LOOK_EXACT = "Keep original pages unchanged — الصفحات الأصلية دون تغيير"
+LOOK_CLEAN = "Reconstruct and polish (fully editable)"
+LOOK_CLOSE = "Enhance a scan or lecture"
+LOOK_EXACT = "Keep original pages unchanged"
 
 COLOUR_KEEP = "Keep the original colours"
 COLOUR_MONO = "Black and white"
@@ -58,11 +58,11 @@ PHOTO_LABELS = {
     "Replace photographs with descriptions": PHOTO_DESCRIBE,
 }
 LANGUAGE_LABELS = {
-    "Detect automatically — اكتشاف تلقائي": "auto",
-    "English — الإنجليزية": "eng",
-    "Arabic — العربية": "ara",
-    "Chinese (Simplified) — الصينية المبسطة": "chi_sim",
-    "Chinese (Traditional) — الصينية التقليدية": "chi_tra",
+    "Detect automatically": "auto",
+    "English": "eng",
+    "Arabic": "ara",
+    "Chinese (Simplified)": "chi_sim",
+    "Chinese (Traditional)": "chi_tra",
 }
 
 AI_AUTO = "Automatic (recommended)"
@@ -164,7 +164,7 @@ class BookToLatexGUI:
         self.photo_var = tk.StringVar(value="Keep real photographs")
 
         self.language_by_label = LANGUAGE_LABELS.copy()
-        default_language = "English" if "English" in self.language_by_label else next(
+        default_language = "Detect automatically" if "Detect automatically" in self.language_by_label else next(
             iter(self.language_by_label)
         )
         self.language_var = tk.StringVar(value=default_language)
@@ -233,7 +233,7 @@ class BookToLatexGUI:
         self.update_button.pack(side="right", padx=(0, 6))
         add_tooltip(
             self.update_button,
-            "Checks the public GitHub release page and offers the correct installer when a newer version exists. — يتحقق من وجود تحديث جديد على GitHub.",
+            "Checks the public GitHub release page and offers the correct installer when a newer version exists.",
         )
 
         files = ttk.LabelFrame(main, text="1. Choose your file", style="Section.TLabelframe")
@@ -315,7 +315,7 @@ class BookToLatexGUI:
         language.grid(row=0, column=1, sticky="ew", padx=(0, 14), pady=7)
         add_tooltip(
             language,
-            "Automatic detection is recommended. If Arabic or Chinese OCR data is missing, the app downloads the official Tesseract language file and remembers it. The source language is preserved, not translated. — يكتشف اللغة ويثبت دعم OCR المطلوب تلقائياً.",
+            "Automatic detection is recommended. If Arabic or Chinese OCR data is missing, the app downloads the official Tesseract language file and remembers it. Choosing Arabic affects the generated document's RTL layout, not the app interface language.",
         )
 
         ttk.Label(preferences, text="Colour").grid(

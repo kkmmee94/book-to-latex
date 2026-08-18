@@ -80,7 +80,7 @@ PHOTO_DESCRIBE = "describe"
 
 DEFAULT_OPENAI_COMPAT_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 DEFAULT_OLLAMA_ENDPOINT = "http://127.0.0.1:11434/api/chat"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/kkmmee94/book-to-latex/releases/latest"
 
 DOCUMENT_LANGUAGES = {

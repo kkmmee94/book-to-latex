@@ -23,9 +23,9 @@ Temporary page renders are deleted automatically. Required visual assets remain 
 
 | Choice | Use it for | Result |
 |---|---|---|
-| **Reconstruct and polish — إعادة بناء محسّنة** | prose, reports, books and fully editable documents | exact wording in a professionally redesigned LaTeX document |
-| **Enhance a scan or lecture — تحسين المسح أو المحاضرة** | scanned lectures, notes, mathematics and older documents | clearer editable reconstruction that keeps the source's recognizable character |
-| **Keep original pages unchanged — الصفحات الأصلية دون تغيير** | documents that must remain visually unchanged | original PDF pages are placed directly into LaTeX with shapes, colors, headers, footers and images unchanged |
+| **Reconstruct and polish** | prose, reports, books and fully editable documents | exact wording in a professionally redesigned LaTeX document |
+| **Enhance a scan or lecture** | scanned lectures, notes, mathematics and older documents | clearer editable reconstruction that keeps the source's recognizable character |
+| **Keep original pages unchanged** | documents that must remain visually unchanged | original PDF pages are placed directly into LaTeX with shapes, colors, headers, footers and images unchanged |
 
 Every visible option in the desktop app has a hover explanation. Technical controls live under **Advanced settings**.
 
@@ -102,7 +102,7 @@ Arabic OCR data ships with the app; the Tesseract executable is still required. 
 
 The language selector defaults to automatic detection. When Arabic or Chinese OCR data is missing, the app downloads the official `tessdata_fast` language file into the user's application-data folder and reuses it. Users do not need to install Tesseract language packs manually.
 
-The desktop and browser interfaces include **Check for updates — التحقق من التحديثات**. It checks the public GitHub release feed and opens the official installer/download page only when a newer version exists.
+The desktop and browser interfaces include **Check for updates**. It checks the public GitHub release feed and opens the official installer/download page only when a newer version exists.
 
 ## Local AI
 
