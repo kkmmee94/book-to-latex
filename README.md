@@ -1,5 +1,9 @@
 # Book to LaTeX & PDF
 
+[![Tests](https://github.com/kkmmee94/book-to-latex/actions/workflows/tests.yml/badge.svg)](https://github.com/kkmmee94/book-to-latex/actions/workflows/tests.yml)
+[![Release builds](https://github.com/kkmmee94/book-to-latex/actions/workflows/release.yml/badge.svg)](https://github.com/kkmmee94/book-to-latex/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A local-first desktop app, browser app, and command-line tool that turns documents into LaTeX and a compiled PDF. It is designed so a nontechnical user can choose a file, choose how closely the output should match it, and receive the result without configuring OCR, AI endpoints, or LaTeX commands.
 
 ## What the user receives
@@ -10,19 +14,30 @@ Every normal conversion keeps the output folder simple:
 MyDocument.tex                        LaTeX source
 MyDocument.pdf                        compiled, ready-to-read PDF
 MyDocument_conversion_report.txt      plain-language result or error details
+MyDocument_assets/                    only when photos/logos/source visuals are required
 ```
 
-Temporary page renders are deleted automatically. A compiler log is kept only when PDF creation fails. Advanced per-page review files are opt-in.
+Temporary page renders are deleted automatically. Required visual assets remain because deleting them would make the LaTeX impossible to compile. A compiler log is kept only when PDF creation fails. Advanced per-page review files are opt-in.
 
 ## Three simple choices
 
 | Choice | Use it for | Result |
 |---|---|---|
 | **Clean and editable** | prose, poetry, essays, reports | clean, searchable LaTeX that is easy to edit |
-| **Stay close to the original layout** | mathematics, tables, slides, and structured pages | vision-assisted editable reconstruction |
-| **Exact visual copy** | documents that must look identical | original PDF pages are placed directly into LaTeX without creating hundreds of PNG files |
+| **Stay close to the original layout** | mathematics, tables, slides, and structured pages | vision-assisted editable reconstruction; it is not an identical copy |
+| **Exact visual copy** | documents that must look identical | original PDF pages are placed directly into LaTeX with their shapes, colors, headers, footers and images unchanged |
 
 Every visible option in the desktop app has a hover explanation. Technical controls live under **Advanced settings**.
+
+## Page and visual decisions are independent
+
+- **Finished page size:** same physical shape as the source, A4, or US Letter.
+- **Use of pages:** compact continuous flow or one source page per output page. Both remain available for editable modes.
+- **Exact visual copy:** always one source page per output page because changing page boundaries cannot remain an exact copy. It may use the source page size, A4, or US Letter.
+- **Natural photographs:** keep photographs of people, animals, places and objects, or replace them with objective written descriptions.
+- **Semantic visuals:** graphs, charts, tables, equations, flowcharts and technical diagrams are reconstructed as editable LaTeX only when their values and geometry can be recovered without guessing. If exact reconstruction is unsafe, the source visual is retained so it never disappears.
+
+Temporary analysis renders are deleted. Retained photos, logos, screenshots, and non-reconstructable source visuals are project dependencies and are listed in the conversion report.
 
 ## Language support
 
@@ -129,9 +144,23 @@ Private Ollama conversion:
 book-to-latex --input lecture.pdf --output lecture.tex --provider ollama --model book-latex-qwen3-local-uncensored:8b --compile-pdf --no-review
 ```
 
+Compact editable A4 output with photograph descriptions:
+
+```bash
+book-to-latex --input lecture.pdf --output lecture.tex --provider ollama --model book-latex-qwen35-vision:9b --vision --redraw-graphs --preserve-layout --preserve-color --page-size a4 --page-flow compact --photo-handling describe --compile-pdf --no-review
+```
+
+Exact page-for-page copy on the original page size:
+
+```bash
+book-to-latex --input original.pdf --output exact-copy.tex --image-only --page-size source --page-flow source_pages --compile-pdf --no-review
+```
+
 ## Reliability behavior
 
 - AI is forbidden from inventing image filenames.
+- A visual-inventory pass distinguishes semantic graphs/tables/diagrams from natural photographs, logos, screenshots and artwork.
+- Invented or random semantic redraws are rejected; the original source visual is retained when exact data cannot be recovered.
 - Before compilation, unavailable `\includegraphics` references are replaced with a visible notice and listed in the report.
 - Common generated table, package, and TikZ mistakes are repaired before compiling.
 - The compiler runs twice for references, then removes `.aux`, `.toc`, `.out`, `.log`, and other temporary build files.

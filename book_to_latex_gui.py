@@ -21,6 +21,13 @@ from book_to_latex import (
     DOCUMENT_LANGUAGES,
     IMAGE_EXTENSIONS,
     MATCH_MODE_PERCENT,
+    PAGE_FLOW_COMPACT,
+    PAGE_FLOW_SOURCE,
+    PAGE_SIZE_A4,
+    PAGE_SIZE_LETTER,
+    PAGE_SIZE_SOURCE,
+    PHOTO_DESCRIBE,
+    PHOTO_KEEP,
     SUPPORTED_INPUT_EXTENSIONS,
     ConversionCancelled,
     convert_book_to_latex,
@@ -34,6 +41,20 @@ LOOK_EXACT = "Exact visual copy"
 
 COLOUR_KEEP = "Keep the original colours"
 COLOUR_MONO = "Black and white"
+
+PAGE_SIZE_LABELS = {
+    "Same size as the original": PAGE_SIZE_SOURCE,
+    "A4 pages": PAGE_SIZE_A4,
+    "US Letter pages": PAGE_SIZE_LETTER,
+}
+PAGE_FLOW_LABELS = {
+    "Compact — use fewer pages": PAGE_FLOW_COMPACT,
+    "Keep every source page separate": PAGE_FLOW_SOURCE,
+}
+PHOTO_LABELS = {
+    "Keep real photographs": PHOTO_KEEP,
+    "Replace photographs with descriptions": PHOTO_DESCRIBE,
+}
 
 AI_AUTO = "Automatic (recommended)"
 AI_OLLAMA = "Choose an installed Ollama model"
@@ -110,8 +131,8 @@ class BookToLatexGUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Book to LaTeX & PDF")
-        self.root.geometry("880x720")
-        self.root.minsize(760, 650)
+        self.root.geometry("960x850")
+        self.root.minsize(820, 720)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -129,6 +150,9 @@ class BookToLatexGUI:
         self.output_var = tk.StringVar()
         self.look_var = tk.StringVar(value=LOOK_CLEAN)
         self.colour_var = tk.StringVar(value=COLOUR_KEEP)
+        self.page_size_var = tk.StringVar(value="A4 pages")
+        self.page_flow_var = tk.StringVar(value="Compact — use fewer pages")
+        self.photo_var = tk.StringVar(value="Keep real photographs")
 
         self.language_by_label = {label: code for code, label in DOCUMENT_LANGUAGES.items()}
         default_language = "English" if "English" in self.language_by_label else next(
@@ -154,7 +178,7 @@ class BookToLatexGUI:
         self.keep_page_files_var = tk.BooleanVar(value=False)
         self.detailed_review_var = tk.BooleanVar(value=False)
         self.keep_line_breaks_var = tk.BooleanVar(value=False)
-        self.redraw_graphs_var = tk.BooleanVar(value=False)
+        self.redraw_graphs_var = tk.BooleanVar(value=True)
         self.style_guide_var = tk.StringVar()
 
         self._configure_styles()
@@ -253,43 +277,107 @@ class BookToLatexGUI:
             ).grid(row=row * 2 + 1, column=0, sticky="w", padx=(36, 12), pady=(0, 3))
 
         preferences = ttk.LabelFrame(
-            main, text="3. Language and colour", style="Section.TLabelframe"
+            main, text="3. Page, language and pictures", style="Section.TLabelframe"
         )
         preferences.pack(fill="x", pady=6)
-        ttk.Label(preferences, text="Colour").grid(row=0, column=0, sticky="w", padx=12, pady=10)
-        colour_keep = ttk.Radiobutton(
-            preferences,
-            text=COLOUR_KEEP,
-            value=COLOUR_KEEP,
-            variable=self.colour_var,
-        )
-        colour_keep.grid(row=0, column=1, sticky="w", padx=8, pady=10)
-        colour_mono = ttk.Radiobutton(
-            preferences,
-            text=COLOUR_MONO,
-            value=COLOUR_MONO,
-            variable=self.colour_var,
-        )
-        colour_mono.grid(row=0, column=2, sticky="w", padx=8, pady=10)
-        add_tooltip(
-            [colour_keep, colour_mono],
-            "This controls preserved page pictures and visual reconstruction. Ordinary LaTeX text remains normal black text.",
-        )
+        preferences.columnconfigure(1, weight=1)
+        preferences.columnconfigure(3, weight=1)
+
         ttk.Label(preferences, text="Document language").grid(
-            row=0, column=3, sticky="e", padx=(24, 5), pady=10
+            row=0, column=0, sticky="w", padx=(12, 6), pady=7
         )
         language = ttk.Combobox(
             preferences,
             textvariable=self.language_var,
             values=list(self.language_by_label),
             state="readonly",
-            width=20,
+            width=24,
         )
-        language.grid(row=0, column=4, sticky="w", padx=(5, 12), pady=10)
+        language.grid(row=0, column=1, sticky="ew", padx=(0, 14), pady=7)
         add_tooltip(
             language,
             "Choose the language already used in the document. Arabic enables right-to-left LaTeX, Arabic OCR, and XeLaTeX automatically. The app does not translate unless you ask it to.",
         )
+
+        ttk.Label(preferences, text="Colour").grid(
+            row=0, column=2, sticky="w", padx=(8, 5), pady=7
+        )
+        self.colour_keep_button = ttk.Radiobutton(
+            preferences,
+            text=COLOUR_KEEP,
+            value=COLOUR_KEEP,
+            variable=self.colour_var,
+        )
+        self.colour_keep_button.grid(row=0, column=3, sticky="w", padx=5, pady=7)
+        self.colour_mono_button = ttk.Radiobutton(
+            preferences,
+            text=COLOUR_MONO,
+            value=COLOUR_MONO,
+            variable=self.colour_var,
+        )
+        self.colour_mono_button.grid(row=0, column=4, sticky="w", padx=(5, 12), pady=7)
+        add_tooltip(
+            [self.colour_keep_button, self.colour_mono_button],
+            "Close-layout mode reproduces visible colors in headings, boxes, charts and diagrams. Exact visual copy always keeps the source colors.",
+        )
+
+        ttk.Label(preferences, text="Finished page size").grid(
+            row=1, column=0, sticky="w", padx=(12, 6), pady=7
+        )
+        self.page_size_combo = ttk.Combobox(
+            preferences,
+            textvariable=self.page_size_var,
+            values=list(PAGE_SIZE_LABELS),
+            state="readonly",
+            width=28,
+        )
+        self.page_size_combo.grid(row=1, column=1, sticky="ew", padx=(0, 14), pady=7)
+        add_tooltip(
+            self.page_size_combo,
+            "Same size preserves the source PDF's physical page shape. A4 or US Letter places the result on that paper size. This is separate from how faithfully content is reconstructed.",
+        )
+
+        ttk.Label(preferences, text="Use of pages").grid(
+            row=1, column=2, sticky="w", padx=(8, 5), pady=7
+        )
+        self.page_flow_combo = ttk.Combobox(
+            preferences,
+            textvariable=self.page_flow_var,
+            values=list(PAGE_FLOW_LABELS),
+            state="readonly",
+            width=34,
+        )
+        self.page_flow_combo.grid(
+            row=1, column=3, columnspan=2, sticky="ew", padx=(5, 12), pady=7
+        )
+        add_tooltip(
+            self.page_flow_combo,
+            "Compact lets editable content flow naturally and use fewer pages. Keep every source page separate preserves each source page boundary. Exact visual copy always keeps one source page per output page.",
+        )
+
+        ttk.Label(preferences, text="Real photographs").grid(
+            row=2, column=0, sticky="w", padx=(12, 6), pady=7
+        )
+        self.photo_combo = ttk.Combobox(
+            preferences,
+            textvariable=self.photo_var,
+            values=list(PHOTO_LABELS),
+            state="readonly",
+            width=34,
+        )
+        self.photo_combo.grid(
+            row=2, column=1, columnspan=2, sticky="ew", padx=(0, 14), pady=7
+        )
+        add_tooltip(
+            self.photo_combo,
+            "Keep real photographs as required project assets, or replace photographs of people, animals, places and objects with concise written descriptions. Graphs, tables, equations and technical diagrams are recreated as editable LaTeX either way.",
+        )
+        ttk.Label(
+            preferences,
+            text="Graphs, tables, equations and technical diagrams are recreated as editable LaTeX automatically.",
+            style="Hint.TLabel",
+            wraplength=420,
+        ).grid(row=2, column=3, columnspan=2, sticky="w", padx=(5, 12), pady=7)
 
         self.explanation_label = ttk.Label(
             main,
@@ -308,7 +396,7 @@ class BookToLatexGUI:
 
         ttk.Label(
             main,
-            text="You will receive: an editable LaTeX file, a compiled PDF, and a quality-check report.",
+            text="You will receive: a LaTeX file, compiled PDF, and conversion report. Only required source/photo assets are kept; temporary page renders are deleted.",
             style="Hint.TLabel",
         ).pack(anchor="w", padx=12, pady=(2, 8))
 
@@ -349,11 +437,38 @@ class BookToLatexGUI:
 
     def _update_look_explanation(self) -> None:
         messages = {
-            LOOK_CLEAN: "The app will use the fast local text model when helpful, automatically OCR unreadable pages, create editable LaTeX, compile it, and verify the words and numbers.",
-            LOOK_CLOSE: "The app will automatically choose the installed vision model, inspect both the page image and extracted text, reconstruct mathematics and structure, compile the result, and flag anything uncertain.",
-            LOOK_EXACT: "The app will preserve each PDF/image page exactly inside a LaTeX document, apply your colour choice, compile it, and skip unnecessary AI/OCR work.",
+            LOOK_CLEAN: "Creates editable text with simple formatting. Choose Compact for fewer pages, or keep every source page separate.",
+            LOOK_CLOSE: "Vision AI reconstructs editable mathematics, tables, graphs, diagrams, colors, headers, footers and page structure. Natural photographs follow your Keep or Describe choice.",
+            LOOK_EXACT: "Places every original PDF page directly into LaTeX with its colors, shapes, headers, footers and photographs unchanged. Exact copy keeps one source page per output page; choose Same size, A4 or US Letter.",
         }
-        self.explanation_label.configure(text=messages[self.look_var.get()])
+        look = self.look_var.get()
+        self.explanation_label.configure(text=messages[look])
+        exact = look == LOOK_EXACT
+        if exact:
+            self.page_flow_var.set("Keep every source page separate")
+            self.page_size_var.set("Same size as the original")
+            self.colour_var.set(COLOUR_KEEP)
+        self.page_flow_combo.configure(state="disabled" if exact else "readonly")
+        self.photo_combo.configure(state="disabled" if exact else "readonly")
+        self.colour_keep_button.configure(state="disabled" if exact else "normal")
+        self.colour_mono_button.configure(state="disabled" if exact else "normal")
+        self._update_suggested_output_name()
+
+    def _update_suggested_output_name(self) -> None:
+        input_text = self.input_var.get().strip()
+        if not input_text:
+            return
+        source = Path(input_text)
+        current_text = self.output_var.get().strip()
+        suggested_endings = ("_latex.tex", "_close_layout.tex", "_exact_copy.tex")
+        if current_text and not any(Path(current_text).name == f"{source.stem}{ending}" for ending in suggested_endings):
+            return
+        suffix = {
+            LOOK_CLEAN: "_latex.tex",
+            LOOK_CLOSE: "_close_layout.tex",
+            LOOK_EXACT: "_exact_copy.tex",
+        }[self.look_var.get()]
+        self.output_var.set(str(source.with_name(f"{source.stem}{suffix}")))
 
     def _pick_input(self) -> None:
         supported_pattern = " ".join(
@@ -374,7 +489,7 @@ class BookToLatexGUI:
         source = Path(selected)
         self.input_var.set(selected)
         if not self.output_var.get().strip():
-            self.output_var.set(str(source.with_name(f"{source.stem}_latex.tex")))
+            self._update_suggested_output_name()
         visual = source.suffix.lower() == ".pdf" or source.suffix.lower() in IMAGE_EXTENSIONS
         if self.look_var.get() == LOOK_EXACT and not visual:
             self.look_var.set(LOOK_CLOSE)
@@ -397,9 +512,10 @@ class BookToLatexGUI:
             "How it works",
             "1. Choose the original file.\n\n"
             "2. Choose Clean and editable, Stay close to the original, or Exact visual copy.\n\n"
-            "3. Choose colour or black and white.\n\n"
-            "4. Select Create LaTeX and PDF.\n\n"
-            "The app automatically chooses the correct local AI model, checks whether OCR is needed, analyses PDF quality, compiles the LaTeX, and creates a review report. You do not need to understand those technical steps.",
+            "3. Choose the page size and whether editable content should be compact or keep every source page separate.\n\n"
+            "4. Choose whether real photographs should be kept or replaced with descriptions. Graphs, tables and technical diagrams are recreated as LaTeX automatically.\n\n"
+            "5. Select Create LaTeX and PDF.\n\n"
+            "Exact visual copy is page-for-page and never compact. Editable modes can be compact. The app automatically handles models, OCR, compilation and checking.",
         )
 
     def _open_advanced(self) -> None:
@@ -503,7 +619,7 @@ class BookToLatexGUI:
         )
         ttk.Checkbutton(
             style_tab,
-            text="Ask the vision model to redraw graphs with TikZ/pgfplots",
+            text="Recreate graphs, tables and technical diagrams as editable LaTeX",
             variable=self.redraw_graphs_var,
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=10)
         ttk.Label(
@@ -729,6 +845,9 @@ class BookToLatexGUI:
         colour = self.colour_var.get() == COLOUR_KEEP
         use_ocr = extension == ".pdf" and not exact
         ocr_language = self.language_by_label.get(self.language_var.get(), "eng")
+        page_size = PAGE_SIZE_LABELS.get(self.page_size_var.get(), PAGE_SIZE_A4)
+        page_flow = PAGE_FLOW_LABELS.get(self.page_flow_var.get(), PAGE_FLOW_COMPACT)
+        photo_handling = PHOTO_LABELS.get(self.photo_var.get(), PHOTO_KEEP)
         options: dict[str, Any] = {
             "input_path": Path(input_text),
             "output_path": output_path,
@@ -744,9 +863,12 @@ class BookToLatexGUI:
             "ocr_force": self.ocr_force_var.get(),
             "ocr_lang": ocr_language,
             "document_language": ocr_language,
+            "page_size": page_size,
+            "page_flow": page_flow,
+            "photo_handling": photo_handling,
             "preserve_graphs": False,
             "preserve_layout": close or exact or self.keep_line_breaks_var.get(),
-            "preserve_color": colour and (close or exact),
+            "preserve_color": True if exact else colour and close,
             "image_only": exact,
             "vision_mode": close and not no_llm,
             "redraw_graphs": close and self.redraw_graphs_var.get(),
@@ -852,7 +974,12 @@ class BookToLatexGUI:
         pdf_path = result.get("pdf_path")
         compilation = result.get("compilation") or {}
         if pdf_path:
-            message = f"Finished — LaTeX and PDF created ({result['converted_pages']} page/unit(s))"
+            if result.get("exact_visual_mode"):
+                message = f"Finished — exact page copy created ({result['converted_pages']} source page(s))"
+            elif result.get("page_flow") == PAGE_FLOW_COMPACT:
+                message = f"Finished — compact editable LaTeX and PDF created ({result['converted_pages']} source unit(s))"
+            else:
+                message = f"Finished — editable LaTeX and PDF created with source page boundaries ({result['converted_pages']} unit(s))"
         else:
             message = "LaTeX was created, but the PDF needs attention"
         if uncertain:

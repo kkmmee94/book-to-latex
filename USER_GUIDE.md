@@ -15,11 +15,12 @@ The app checks automatically whether a PDF page has readable text and uses OCR o
 3. Select the file you want to convert. The chooser includes an **All files** option.
 4. The app suggests a filename ending in `_latex.tex`. Change it only if desired.
 5. Choose **Clean and editable**, **Stay close to the original layout**, or **Exact visual copy**.
-6. Choose original colours or black and white.
-7. Select **Create LaTeX and PDF**.
-8. The app automatically chooses the AI model, OCR behavior, review checks and compiler.
-9. Wait until the message begins with **Finished**.
-10. Select **Open finished PDF** to read the result and **Open report** to see what happened.
+6. Choose the finished page size: same as the source, A4, or US Letter.
+7. For editable modes, choose compact flow or keep every source page separate.
+8. Choose whether real photographs stay visible or become descriptions.
+9. Choose original colours or black and white.
+10. Select **Create LaTeX and PDF**.
+11. Wait until the message begins with **Finished**, then use **Open finished PDF** and **Open report**.
 
 Move the pointer over any label, box, or checkbox and pause briefly. A yellow explanation appears.
 
@@ -49,13 +50,36 @@ This mode tries to preserve content, not exact typography or page coordinates. P
 
 ### Stay close to the original layout
 
-This automatically uses the installed vision model. It reads the rendered page image together with layout-preserved extracted text and reconstructs mathematics, tables, columns and structure as editable LaTeX. It aims to stay close, but exact coordinates and fonts are not guaranteed.
+This automatically uses the installed vision model. It reads the rendered page image together with layout-preserved extracted text and reconstructs mathematics, tables, columns, colors and structure as editable LaTeX. It aims to stay close, but it is not an identical copy; exact coordinates and fonts are not guaranteed.
 
 ### Exact visual copy
 
-For PDFs, this places each original PDF page directly into the LaTeX output. It does not create a folder containing hundreds of temporary page pictures. Use it when appearance is more important than editing.
+For PDFs, this places each original PDF page directly into the LaTeX output. It preserves shapes, colors, headers, footers, photographs and the entire page image. It does not create a folder containing hundreds of temporary page pictures. Use it when appearance is more important than editing.
 
-The result looks closest to the source, including diagrams, signatures, formulas, colors, and layout. Because each page is a picture, its words cannot be edited as LaTeX text.
+The result is page-for-page. Because the source page is embedded rather than reconstructed, its words cannot be edited as LaTeX text. Exact mode cannot be compact: combining source pages would change the original layout. You may still place each source page on its original physical page size, A4, or US Letter.
+
+## Page size and use of pages
+
+These controls are separate from visual fidelity.
+
+- **Same size as the original** preserves the physical width and height of the source PDF page.
+- **A4 pages** and **US Letter pages** place the result on that paper size.
+- **Compact — use fewer pages** lets editable content flow continuously and removes repeated source headers, footers and page numbers.
+- **Keep every source page separate** starts each editable source unit on its own output page and asks close-layout mode to retain meaningful top and bottom content.
+
+The separate-page option has not been removed. Exact visual copy selects it automatically because exact and compact cannot both be true.
+
+## Graphs, tables, diagrams and photographs
+
+Close-layout mode first inventories raster visuals.
+
+- Graphs, charts, tables, equations, flowcharts, infographics and technical diagrams are recreated with semantic LaTeX/TikZ/pgfplots when every necessary value and shape can be recovered without guessing.
+- Dense scientific plots or pictorial infographics are retained as source assets when an exact redraw would require invented data. This keeps them visible and avoids a convincing but false graph.
+- **Keep real photographs** retains significant photographs of people, animals, places and objects.
+- **Replace photographs with descriptions** removes natural photographs and places concise objective descriptions in their approximate positions.
+- Logos, signatures, screenshots and meaningful artwork may remain as required project assets in close-layout mode.
+
+Temporary page renders and unused extracted images are deleted. Required `_assets` files remain beside the LaTeX and are listed in the conversion report.
 
 ## Technical controls are optional
 
@@ -195,7 +219,10 @@ Install [MiKTeX](https://miktex.org/download) on Windows or macOS. On Linux, ins
 | Lines per content unit | Splits long text, document, ebook, and spreadsheet content into manageable conversion units |
 | Scan quality | OCR and page-picture resolution; 220 DPI is the balanced default |
 | Keep original line breaks | Useful for poetry and forms, usually off for prose |
-| Keep colors in page pictures | Creates color instead of grayscale source-page images |
+| Finished page size | Same as source, A4, or US Letter |
+| Use of pages | Compact continuous flow or one source page per output page |
+| Real photographs | Keep natural photos or replace them with descriptions |
+| Keep colors | Recreates visible colors in editable close-layout output; exact copy always preserves source colors |
 | Save separate files for every page | Adds a `_pages` directory for detailed editing |
 | Create a detailed per-page review | Adds HTML, CSV, JSON, and page-by-page verification; off by default |
 | LaTeX content only | Omits the document wrapper; intended for experienced LaTeX users |
@@ -247,9 +274,9 @@ The affected page will use safe local conversion and appear in the review report
 
 Check the API key, model name, and connection address. Some providers use a different OpenAI-compatible address.
 
-### The PDF has duplicated pages
+### The output uses more pages than expected
 
-You selected **Editable text + pictures of each PDF page**. That mode intentionally includes both the source-page picture and editable text. Select **Editable text** for text only.
+Select **Compact — use fewer pages** in an editable mode. Select **Keep every source page separate** when every source unit must retain its own output page. Exact visual copy always uses one output page per source page.
 
 ### Exact appearance cannot be selected
 
